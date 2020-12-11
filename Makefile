@@ -11,7 +11,6 @@ GO_IMPORTS=goimports -w
 GO_USEDEXPORTS=usedexports
 GO_ERRCHECK=errcheck -asserts -ignore '[FS]?[Pp]rint*'
 BINARIES=report
-STRIP=strip
 
 all: check ${BINARIES}
 
