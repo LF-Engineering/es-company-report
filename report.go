@@ -311,7 +311,7 @@ func enrichReport(report *contribReport) {
 	}
 	for i, item := range report.items {
 		data, ok := uuids[item.uuid]
-		if !ok {
+		if !ok || (ok && len(data) == 0) {
 			fmt.Printf("uuid %s not found in the database\n", item.uuid)
 			continue
 		}
@@ -402,10 +402,8 @@ func saveSummaryReport(report map[string]contribReportItem) {
 
 func genReport(roots []string) {
 	thrN := runtime.NumCPU()
-	// FIXME starts
 	// thrN = 1
-	roots = roots[:10]
-	// FIXME ends
+	// roots = roots[:10]
 	runtime.GOMAXPROCS(thrN)
 	ch := make(chan []contribReportItem)
 	report := contribReport{}
