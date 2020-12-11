@@ -11,16 +11,22 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jmoiron/sqlx"
+
 	jsoniter "github.com/json-iterator/go"
+
+	_ "github.com/go-sql-driver/mysql"
 )
 
 var (
 	gESURL string
+	gDB    *sqlx.DB
 	gOrg   string
 )
 
 // contributor name, email address, project slug and affiliation date range
 type contribReportItem struct {
+	uuid    string
 	name    string
 	email   string
 	project string
@@ -140,11 +146,27 @@ func jsonEscape(str string) string {
 	return string(b[1 : len(b)-1])
 }
 
+func timeParseES(dtStr string) (time.Time, error) {
+	dtStr = strings.TrimSpace(strings.Replace(dtStr, "Z", "", -1))
+	ary := strings.Split(dtStr, "+")
+	ary2 := strings.Split(ary[0], ".")
+	var s string
+	if len(ary2) == 1 {
+		s = ary2[0] + ".000"
+	} else {
+		if len(ary2[1]) > 3 {
+			ary2[1] = ary2[1][:3]
+		}
+		s = strings.Join(ary2, ".")
+	}
+	return time.Parse("2006-01-02T15:04:05.000", s)
+}
+
 func reportForRoot(ch chan []contribReportItem, root string) (items []contribReportItem) {
 	defer func() {
 		ch <- items
 	}()
-	fmt.Printf("running for: %s\n", root)
+	// fmt.Printf("running for: %s\n", root)
 	pattern := jsonEscape("sds-" + root + "-*,-*-raw,-*-for-merge")
 	org := jsonEscape(gOrg)
 	method := "POST"
@@ -173,12 +195,24 @@ func reportForRoot(ch chan []contribReportItem, root string) (items []contribRep
 	err = jsoniter.Unmarshal(body, &result)
 	fatalError(err)
 	if len(result.Rows) == 0 {
-		fmt.Printf("no hits\n")
 		return
 	}
 	processResults := func() {
 		for _, row := range result.Rows {
-			fmt.Printf("row: %+v\n", row)
+			// [uuidstr 6 2019-06-25T06:07:45.000Z 2019-07-05T23:17:20.000Z]
+			uuid, _ := row[0].(string)
+			fN, _ := row[1].(float64)
+			n := int(fN)
+			from, _ := timeParseES(row[2].(string))
+			to, _ := timeParseES(row[3].(string))
+			item := contribReportItem{
+				uuid:    uuid,
+				n:       n,
+				from:    from,
+				to:      to,
+				project: root,
+			}
+			items = append(items, item)
 		}
 	}
 	processResults()
@@ -196,7 +230,6 @@ func reportForRoot(ch chan []contribReportItem, root string) (items []contribRep
 		err = jsoniter.Unmarshal(body, &result)
 		fatalError(err)
 		if len(result.Rows) == 0 {
-			fmt.Printf("no more rows\n")
 			break
 		}
 		processResults()
@@ -213,16 +246,24 @@ func reportForRoot(ch chan []contribReportItem, root string) (items []contribRep
 	body, err = ioutil.ReadAll(resp.Body)
 	fatalError(err)
 	_ = resp.Body.Close()
-
-	fmt.Printf("%v\n", items)
-	os.Exit(1)
+	// fmt.Printf("%s: %v\n", root, items)
 	return
+}
+
+func enrichReport(report *contribReport) {
+	uuids := make(map[string][]string)
+	for _, item := range report.items {
+		uuids[item.uuid] = []string{}
+	}
+	fmt.Printf("uuids: %+v\n", uuids)
 }
 
 func genReport(roots []string) {
 	thrN := runtime.NumCPU()
-	// FIXME
-	thrN = 1
+	// FIXME starts
+	// thrN = 1
+	roots = roots[:10]
+	// FIXME ends
 	runtime.GOMAXPROCS(thrN)
 	ch := make(chan []contribReportItem)
 	report := contribReport{}
@@ -245,7 +286,18 @@ func genReport(roots []string) {
 			report.items = append(report.items, item)
 		}
 	}
+	enrichReport(&report)
 	// TODO: generate summary
+}
+
+func setupSHDB() {
+	dbURL := os.Getenv("DB_URL")
+	if dbURL == "" {
+		fatal("DB_URL must be set")
+	}
+	var err error
+	gDB, err = sqlx.Connect("mysql", dbURL)
+	fatalError(err)
 }
 
 func main() {
@@ -257,5 +309,6 @@ func main() {
 	if gOrg == "" {
 		fatal("ORG must be set")
 	}
+	setupSHDB()
 	genReport(getSlugRoots())
 }
