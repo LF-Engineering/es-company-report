@@ -255,7 +255,64 @@ func enrichReport(report *contribReport) {
 	for _, item := range report.items {
 		uuids[item.uuid] = []string{}
 	}
-	fmt.Printf("uuids: %+v\n", uuids)
+	nUUIDs := len(uuids)
+	if nUUIDs == 0 {
+		return
+	}
+	uuidsAry := []string{}
+	for uuid := range uuids {
+		uuidsAry = append(uuidsAry, uuid)
+	}
+	packSize := 1000
+	nPacks := nUUIDs / packSize
+	if nUUIDs%packSize != 0 {
+		nPacks++
+	}
+	for i := 0; i < nPacks; i++ {
+		from := i * packSize
+		to := from + packSize
+		if to > nUUIDs {
+			to = nUUIDs
+		}
+		args := []interface{}{}
+		query := "select uuid, name, email from profiles where uuid in("
+		for _, uuid := range uuidsAry[from:to] {
+			query += "?,"
+			args = append(args, uuid)
+		}
+		query = query[:len(query)-1] + ")"
+		rows, err := gDB.Query(query, args...)
+		fatalError(err)
+		var (
+			uuid   string
+			pName  *string
+			pEmail *string
+		)
+		for rows.Next() {
+			err = rows.Scan(&uuid, &pName, &pEmail)
+			fatalError(err)
+			name, email := "", ""
+			if pName != nil {
+				name = *pName
+			}
+			if pEmail != nil {
+				email = *pEmail
+			}
+			uuids[uuid] = []string{name, email}
+		}
+		fatalError(rows.Err())
+		fatalError(rows.Close())
+	}
+	for i, item := range report.items {
+		data, ok := uuids[item.uuid]
+		if !ok {
+			fmt.Printf("uuid %s not found in the database\n", item.uuid)
+			continue
+		}
+		report.items[i].name = data[0]
+		report.items[i].email = data[1]
+	}
+	fmt.Printf("%+v\n", *report)
 }
 
 func genReport(roots []string) {
