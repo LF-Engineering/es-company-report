@@ -47,6 +47,40 @@ func getIndices(res map[string]interface{}) (indices []string) {
 
 func getRoots(indices, aliases []string) (roots []string) {
 	fmt.Printf("%d indices, %d aliases\n", len(indices), len(aliases))
+	dss := make(map[string]struct{})
+	all := make(map[string]struct{})
+	for _, idx := range indices {
+		ary := strings.Split(idx, "-")
+		lAry := len(ary)
+		dss[ary[lAry-1]] = struct{}{}
+		root := strings.Join(ary[1:lAry-1], "-")
+		if strings.HasSuffix(root, "-github") {
+			root = root[:len(root)-7]
+		}
+		if root == "" {
+			continue
+		}
+		all[root] = struct{}{}
+	}
+	for _, idx := range aliases {
+		ary := strings.Split(idx, "-")
+		lAry := len(ary)
+		dss[ary[lAry-1]] = struct{}{}
+		root := strings.Join(ary[1:lAry-1], "-")
+		if strings.HasSuffix(root, "-github") {
+			root = root[:len(root)-7]
+		}
+		if root == "" {
+			continue
+		}
+		all[root] = struct{}{}
+	}
+	fmt.Printf("%d data source types\n", len(dss))
+	for root := range all {
+		roots = append(roots, root)
+	}
+	sort.Strings(roots)
+	fmt.Printf("%d projects detected\n", len(roots))
 	return
 }
 
