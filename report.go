@@ -2,12 +2,14 @@ package main
 
 import (
 	"bytes"
+	"encoding/csv"
 	"fmt"
 	"io/ioutil"
 	"net/http"
 	"os"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -162,6 +164,10 @@ func timeParseES(dtStr string) (time.Time, error) {
 	return time.Parse("2006-01-02T15:04:05.000", s)
 }
 
+func toMDYDate(dt time.Time) string {
+	return fmt.Sprintf("%d/%d/%d", dt.Month(), dt.Day(), dt.Year())
+}
+
 func reportForRoot(ch chan []contribReportItem, root string) (items []contribReportItem) {
 	defer func() {
 		ch <- items
@@ -312,7 +318,86 @@ func enrichReport(report *contribReport) {
 		report.items[i].name = data[0]
 		report.items[i].email = data[1]
 	}
-	fmt.Printf("%+v\n", *report)
+}
+
+func summaryReport(report *contribReport) {
+	report.summary = make(map[string]contribReportItem)
+	for _, item := range report.items {
+		uuid := item.uuid
+		sItem, ok := report.summary[uuid]
+		if !ok {
+			sItem = item
+			sItem.project = ""
+			report.summary[uuid] = sItem
+			continue
+		}
+		sItem.n += item.n
+		if sItem.from.After(item.from) {
+			sItem.from = item.from
+		}
+		if sItem.to.Before(item.to) {
+			sItem.to = item.to
+		}
+		report.summary[uuid] = sItem
+	}
+}
+
+func saveReport(report []contribReportItem) {
+	rows := [][]string{}
+	for _, item := range report {
+		row := []string{item.name, item.email, item.project, strconv.Itoa(item.n), toMDYDate(item.from), toMDYDate(item.to), item.uuid}
+		rows = append(rows, row)
+	}
+	sort.Slice(
+		rows,
+		func(i, j int) bool {
+			iN, _ := strconv.Atoi(rows[i][3])
+			jN, _ := strconv.Atoi(rows[j][3])
+			if iN == jN {
+				return rows[i][0] > rows[j][0]
+			}
+			return iN > jN
+		},
+	)
+	var writer *csv.Writer
+	file, err := os.Create("report.csv")
+	fatalError(err)
+	defer func() { _ = file.Close() }()
+	writer = csv.NewWriter(file)
+	defer writer.Flush()
+	fatalError(writer.Write([]string{"name", "email", "project", "contributions", "from", "to", "uuid"}))
+	for _, row := range rows {
+		fatalError(writer.Write(row))
+	}
+}
+
+func saveSummaryReport(report map[string]contribReportItem) {
+	rows := [][]string{}
+	for _, item := range report {
+		row := []string{item.name, item.email, strconv.Itoa(item.n), toMDYDate(item.from), toMDYDate(item.to), item.uuid}
+		rows = append(rows, row)
+	}
+	sort.Slice(
+		rows,
+		func(i, j int) bool {
+			iN, _ := strconv.Atoi(rows[i][2])
+			jN, _ := strconv.Atoi(rows[j][2])
+			if iN == jN {
+				return rows[i][0] > rows[j][0]
+			}
+			return iN > jN
+		},
+	)
+	var writer *csv.Writer
+	file, err := os.Create("summary.csv")
+	fatalError(err)
+	defer func() { _ = file.Close() }()
+	writer = csv.NewWriter(file)
+	defer writer.Flush()
+	fatalError(writer.Write([]string{"name", "email", "contributions", "from", "to", "uuid"}))
+	for _, row := range rows {
+		fatalError(writer.Write(row))
+	}
 }
 
 func genReport(roots []string) {
@@ -344,7 +429,9 @@ func genReport(roots []string) {
 		}
 	}
 	enrichReport(&report)
-	// TODO: generate summary
+	summaryReport(&report)
+	saveReport(report.items)
+	saveSummaryReport(report.summary)
 }
 
 func setupSHDB() {
