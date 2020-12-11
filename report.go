@@ -5,6 +5,8 @@ import (
 	"io/ioutil"
 	"net/http"
 	"os"
+	"sort"
+	"strings"
 
 	jsoniter "github.com/json-iterator/go"
 )
@@ -31,8 +33,20 @@ func getIndices(res map[string]interface{}) (indices []string) {
 	for _, i := range ary {
 		item, _ := i.(map[string]interface{})
 		idx, _ := item["index"].(string)
-		fmt.Printf("%s\n", idx)
+		if !strings.HasPrefix(idx, "sds-") {
+			continue
+		}
+		if strings.HasSuffix(idx, "-raw") || strings.HasSuffix(idx, "-for-merge") {
+			continue
+		}
+		indices = append(indices, idx)
 	}
+	sort.Strings(indices)
+	return
+}
+
+func getRoots(indices, aliases []string) (roots []string) {
+	fmt.Printf("%d indices, %d aliases\n", len(indices), len(aliases))
 	return
 }
 
@@ -52,7 +66,20 @@ func getSlugRoots() (slugRoots []string) {
 	err = jsoniter.Unmarshal(body, &result)
 	fatalError(err)
 	indices := getIndices(result)
-	slugRoots = indices
+	url = gESURL + "/_cat/aliases?format=json"
+	req, err = http.NewRequest(method, url, nil)
+	fatalError(err)
+	resp, err = http.DefaultClient.Do(req)
+	fatalError(err)
+	body, err = ioutil.ReadAll(resp.Body)
+	fatalError(err)
+	_ = resp.Body.Close()
+	body = append([]byte(`{"x":`), body...)
+	body = append(body, []byte(`}`)...)
+	err = jsoniter.Unmarshal(body, &result)
+	fatalError(err)
+	aliases := getIndices(result)
+	slugRoots = getRoots(indices, aliases)
 	return
 }
 
