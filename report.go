@@ -28,13 +28,14 @@ var (
 
 // contributor name, email address, project slug and affiliation date range
 type contribReportItem struct {
-	uuid    string
-	name    string
-	email   string
-	project string
-	n       int
-	from    time.Time
-	to      time.Time
+	uuid       string
+	name       string
+	email      string
+	project    string
+	subProject string
+	n          int
+	from       time.Time
+	to         time.Time
 }
 type contribReport struct {
 	items   []contribReportItem
@@ -210,7 +211,7 @@ func reportForRoot(ch chan []contribReportItem, root string) (items []contribRep
 	org := jsonEscape(gOrg)
 	method := "POST"
 	data := fmt.Sprintf(
-		`{"query":"select author_uuid, count(*) as cnt, min(metadata__updated_on) as f, max(metadata__updated_on) as t from \"%s\" where author_org_name = '%s' group by author_uuid","fetch_size":%d}`,
+		`{"query":"select author_uuid, count(*) as cnt, min(metadata__updated_on) as f, max(metadata__updated_on) as t, project from \"%s\" where author_org_name = '%s' group by author_uuid, project","fetch_size":%d}`,
 		pattern,
 		org,
 		10000,
@@ -238,18 +239,23 @@ func reportForRoot(ch chan []contribReportItem, root string) (items []contribRep
 	}
 	processResults := func() {
 		for _, row := range result.Rows {
-			// [uuidstr 6 2019-06-25T06:07:45.000Z 2019-07-05T23:17:20.000Z]
+			// [uuidstr 6 2019-06-25T06:07:45.000Z 2019-07-05T23:17:20.000Z subproj]
 			uuid, _ := row[0].(string)
 			fN, _ := row[1].(float64)
 			n := int(fN)
 			from, _ := timeParseES(row[2].(string))
 			to, _ := timeParseES(row[3].(string))
+			subProject, _ := row[4].(string)
+			if subProject == "" {
+				subProject = "-"
+			}
 			item := contribReportItem{
-				uuid:    uuid,
-				n:       n,
-				from:    from,
-				to:      to,
-				project: sfName,
+				uuid:       uuid,
+				n:          n,
+				from:       from,
+				to:         to,
+				project:    sfName,
+				subProject: subProject,
 			}
 			items = append(items, item)
 		}
@@ -286,9 +292,11 @@ func reportForRoot(ch chan []contribReportItem, root string) (items []contribRep
 	fatalError(err)
 	_ = resp.Body.Close()
 	// fmt.Printf("%s -> %s: %v\n", root, sfName, items)
-	if len(items) > 0 {
-		fmt.Printf("%s -> %s: %v\n", root, sfName, items)
-	}
+	/*
+		if len(items) > 0 {
+			fmt.Printf("%s -> %s: %+v\n", root, sfName, items)
+		}
+	*/
 	return
 }
 
@@ -364,6 +372,7 @@ func summaryReport(report *contribReport) {
 		if !ok {
 			sItem = item
 			sItem.project = ""
+			sItem.subProject = ""
 			report.summary[uuid] = sItem
 			continue
 		}
@@ -381,16 +390,20 @@ func summaryReport(report *contribReport) {
 func saveReport(report []contribReportItem) {
 	rows := [][]string{}
 	for _, item := range report {
-		row := []string{item.name, item.email, item.project, strconv.Itoa(item.n), toMDYDate(item.from), toMDYDate(item.to), item.uuid}
+		row := []string{item.name, item.email, item.project, item.subProject, strconv.Itoa(item.n), toMDYDate(item.from), toMDYDate(item.to), item.uuid}
 		rows = append(rows, row)
 	}
 	sort.Slice(
 		rows,
 		func(i, j int) bool {
-			iN, _ := strconv.Atoi(rows[i][3])
-			jN, _ := strconv.Atoi(rows[j][3])
+			iN, _ := strconv.Atoi(rows[i][4])
+			jN, _ := strconv.Atoi(rows[j][4])
 			if iN == jN {
-				return rows[i][0] > rows[j][0]
+				for k := 0; k <= 3; k++ {
+					if rows[i][k] != rows[j][k] {
+						return rows[i][k] > rows[j][k]
+					}
+				}
 			}
 			return iN > jN
 		},
@@ -401,7 +414,7 @@ func saveReport(report []contribReportItem) {
 	defer func() { _ = file.Close() }()
 	writer = csv.NewWriter(file)
 	defer writer.Flush()
-	fatalError(writer.Write([]string{"name", "email", "project", "contributions", "from", "to", "uuid"}))
+	fatalError(writer.Write([]string{"name", "email", "project", "sub_project", "contributions", "from", "to", "uuid"}))
 	for _, row := range rows {
 		fatalError(writer.Write(row))
 	}
@@ -419,7 +432,11 @@ func saveSummaryReport(report map[string]contribReportItem) {
 			iN, _ := strconv.Atoi(rows[i][2])
 			jN, _ := strconv.Atoi(rows[j][2])
 			if iN == jN {
-				return rows[i][0] > rows[j][0]
+				for k := 0; k <= 1; k++ {
+					if rows[i][k] != rows[j][k] {
+						return rows[i][k] > rows[j][k]
+					}
+				}
 			}
 			return iN > jN
 		},
