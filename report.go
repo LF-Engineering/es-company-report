@@ -168,11 +168,44 @@ func toMDYDate(dt time.Time) string {
 	return fmt.Sprintf("%d/%d/%d", dt.Month(), dt.Day(), dt.Year())
 }
 
+func applySlugMapping(slug string) (sfName string) {
+	slugs := []string{slug}
+	/*
+		defer func() {
+			if sfName != slug {
+				fmt.Printf("slug mapping: %s -> %+v -> %s\n", slug, slugs, sfName)
+			}
+		}()
+	*/
+	ary := strings.Split(slug, "-")
+	n := len(ary)
+	for i := 1; i < n; i++ {
+		slugs = append(slugs, strings.Join(ary[:i], "-")+"/"+strings.Join(ary[i:], "-"))
+	}
+	for _, slg := range slugs {
+		rows, err := gDB.Query("select sf_name from slug_mapping where da_name = ?", slg)
+		fatalError(err)
+		for rows.Next() {
+			err = rows.Scan(&sfName)
+			fatalError(err)
+			break
+		}
+		fatalError(rows.Err())
+		fatalError(rows.Close())
+		if sfName != "" {
+			return
+		}
+	}
+	sfName = slug
+	return
+}
+
 func reportForRoot(ch chan []contribReportItem, root string) (items []contribReportItem) {
 	defer func() {
 		ch <- items
 	}()
-	// fmt.Printf("running for: %s\n", root)
+	sfName := applySlugMapping(root)
+	// fmt.Printf("running for: %s -> %s\n", root, sfName)
 	pattern := jsonEscape("sds-" + root + "-*,-*-raw,-*-for-merge")
 	org := jsonEscape(gOrg)
 	method := "POST"
@@ -216,7 +249,7 @@ func reportForRoot(ch chan []contribReportItem, root string) (items []contribRep
 				n:       n,
 				from:    from,
 				to:      to,
-				project: root,
+				project: sfName,
 			}
 			items = append(items, item)
 		}
@@ -252,7 +285,10 @@ func reportForRoot(ch chan []contribReportItem, root string) (items []contribRep
 	body, err = ioutil.ReadAll(resp.Body)
 	fatalError(err)
 	_ = resp.Body.Close()
-	// fmt.Printf("%s: %v\n", root, items)
+	// fmt.Printf("%s -> %s: %v\n", root, sfName, items)
+	if len(items) > 0 {
+		fmt.Printf("%s -> %s: %v\n", root, sfName, items)
+	}
 	return
 }
 
