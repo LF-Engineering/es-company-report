@@ -358,9 +358,9 @@ func enrichOtherMetrics(ch chan struct{}, mtx *sync.RWMutex, report *contribRepo
 		ch <- struct{}{}
 	}()
 	// other items:
-	// commits, loc_added, loc_deleted
-	// prAct: total PR Activity (PRs submitted + reviewed + approved + merged + review comments + PR comments)
-	// issueAct: total Issue Activity (issues submitted + issues closed + issue comments)
+	// commits, loc_added, loc_deleted.
+	// prAct: total PR Activity (PRs submitted + reviewed + approved + merged + review comments + PR comments).
+	// issueAct: total Issue Activity (issues submitted + issues closed + issue comments), note: we don't have data about who closed an issue.
 	mtx.RLock()
 	item := report.items[idx]
 	root := item.root
@@ -385,12 +385,8 @@ func enrichOtherMetrics(ch chan struct{}, mtx *sync.RWMutex, report *contribRepo
 	}
 	var result resultType
 	githubPattern := jsonEscape("sds-" + root + "-github-issue")
+	gitPattern := jsonEscape("sds-" + root + "-git")
 	processGit := func() {
-		gitPattern := jsonEscape("sds-" + root + "-git")
-		_, ok := gAll[gitPattern]
-		if !ok {
-			return
-		}
 		data := fmt.Sprintf(
 			// FIXME: once da-ds git is eabled
 			// `{"query":"select count(distinct hash) as commits, sum(lines_added) as loc_added, sum(lines_removed) as loc_removed from \"%s\" where type = 'commit' and hash is not null and author_uuid = '%s' and %s","fetch_size":%d}`,
@@ -435,13 +431,12 @@ func enrichOtherMetrics(ch chan struct{}, mtx *sync.RWMutex, report *contribRepo
 		}
 	}
 	processGitHubPR := func() {
-		_, ok := gAll[githubPattern]
-		if !ok {
-			return
-		}
 		data := fmt.Sprintf(
-			`{"query":"select count(distinct id) as pr_activity from \"%s\" where type in ('pull_request', 'pull_request_review', 'pull_request_comment') and (author_uuid = '%s' or merged_by_data_uuid = '%s') and %s","fetch_size":%d}`,
+			// FIXME: if we want more PR related events
+			// `{"query":"select count(distinct id) as pr_activity from \"%s\" where type in ('pull_request', 'pull_request_review', 'pull_request_comment', 'pull_request_requested_reviewer', 'pull_request_assignee', 'pull_request_comment_reaction') and (author_uuid = '%s' or user_data_uuid = '%s' or merged_by_data_uuid = '%s') and %s","fetch_size":%d}`,
+			`{"query":"select count(distinct id) as pr_activity from \"%s\" where type in ('pull_request', 'pull_request_review', 'pull_request_comment') and (author_uuid = '%s' or user_data_uuid = '%s' or merged_by_data_uuid = '%s') and %s","fetch_size":%d}`,
 			githubPattern,
+			uuid,
 			uuid,
 			uuid,
 			projectCond,
@@ -475,8 +470,54 @@ func enrichOtherMetrics(ch chan struct{}, mtx *sync.RWMutex, report *contribRepo
 			mtx.Unlock()
 		}
 	}
-	processGit()
-	processGitHubPR()
+	processGitHubIssue := func() {
+		data := fmt.Sprintf(
+			// FIXME: if we want more issue related events
+			//`{"query":"select count(distinct id) as issue_activity from \"%s\" where type in ('issue', 'issue_comment', 'issue_assignee', 'issue_comment_reaction', 'issue_reaction') and (author_uuid = '%s' or user_data_uuid = '%s') and %s","fetch_size":%d}`,
+			`{"query":"select count(distinct id) as issue_activity from \"%s\" where type in ('issue', 'issue_comment') and (author_uuid = '%s' or user_data_uuid = '%s') and %s","fetch_size":%d}`,
+			githubPattern,
+			uuid,
+			uuid,
+			projectCond,
+			10000,
+		)
+		payloadBytes := []byte(data)
+		payloadBody := bytes.NewReader(payloadBytes)
+		req, err := http.NewRequest(method, url, payloadBody)
+		fatalError(err)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		fatalError(err)
+		body, err := ioutil.ReadAll(resp.Body)
+		fatalError(err)
+		_ = resp.Body.Close()
+		err = jsoniter.Unmarshal(body, &result)
+		fatalError(err)
+		if result.Error.Type != "" || result.Error.Reason != "" {
+			fmt.Printf("error for %s/%s: %v\n", githubPattern, uuid, result.Error)
+			return
+		}
+		if len(result.Rows) == 0 {
+			return
+		}
+		for _, row := range result.Rows {
+			// [0] or [<nil>]
+			fAct, _ := row[0].(float64)
+			act := int(fAct)
+			mtx.Lock()
+			report.items[idx].issueAct = act
+			mtx.Unlock()
+		}
+	}
+	_, ok := gAll[gitPattern]
+	if ok {
+		processGit()
+	}
+	_, ok = gAll[githubPattern]
+	if ok {
+		processGitHubPR()
+		processGitHubIssue()
+	}
 }
 
 func enrichReport(report *contribReport) {
@@ -591,6 +632,7 @@ func summaryReport(report *contribReport) {
 		sItem.locAdded += item.locAdded
 		sItem.locDeleted += item.locDeleted
 		sItem.prAct += item.prAct
+		sItem.issueAct += item.issueAct
 		if sItem.from.After(item.from) {
 			sItem.from = item.from
 		}
