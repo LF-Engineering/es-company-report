@@ -6,5 +6,5 @@ Report given company's contribution data stored in ElasticSearch
 
 - Provide your `ES_URL.${env_name}.secret` value(s).
 - Provide your `DB_URL.${env_name}.secret` value(s).
-- Run `ORG='Facebook, Inc.' ./run.sh env_name`.
+- Run `[FROM=YYYY-MM-DD] [TO=YYYY-MM-DD] ORG='Facebook, Inc.' ./run.sh env_name`.
 

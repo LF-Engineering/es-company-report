@@ -24,6 +24,8 @@ var (
 	gESURL string
 	gDB    *sqlx.DB
 	gOrg   string
+	gFrom  string
+	gTo    string
 	gDbg   bool
 )
 
@@ -224,13 +226,14 @@ func reportForRoot(ch chan []contribReportItem, root string) (items []contribRep
 	}()
 	sfName := applySlugMapping(root)
 	// fmt.Printf("running for: %s -> %s\n", root, sfName)
-	pattern := jsonEscape("sds-" + root + "-*,-*-raw,-*-for-merge")
-	org := jsonEscape(gOrg)
+	pattern := jsonEscape("sds-" + root + "-*,-*-raw,-*-for-merge,-*-cache,-*-converted,-*-temp")
 	method := "POST"
 	data := fmt.Sprintf(
-		`{"query":"select author_uuid, count(*) as cnt, min(metadata__updated_on) as f, max(metadata__updated_on) as t, project from \"%s\" where author_org_name = '%s' group by author_uuid, project","fetch_size":%d}`,
+		`{"query":"select author_uuid, count(*) as cnt, min(metadata__updated_on) as f, max(metadata__updated_on) as t, project from \"%s\" where author_org_name = '%s' and metadata__updated_on >= '%s' and metadata__updated_on < '%s' group by author_uuid, project","fetch_size":%d}`,
 		pattern,
-		org,
+		gOrg,
+		gFrom,
+		gTo,
 		10000,
 	)
 	payloadBytes := []byte(data)
@@ -512,7 +515,8 @@ func setupSHDB() {
 	fatalError(err)
 }
 
-func main() {
+func setupEnvs() {
+	gDbg = os.Getenv("DBG") != ""
 	gESURL = os.Getenv("ES_URL")
 	if gESURL == "" {
 		fatal("ES_URL must be set")
@@ -521,7 +525,19 @@ func main() {
 	if gOrg == "" {
 		fatal("ORG must be set")
 	}
-	gDbg = os.Getenv("DBG") != ""
+	gOrg = jsonEscape(gOrg)
+	gFrom = jsonEscape(os.Getenv("FROM"))
+	gTo = jsonEscape(os.Getenv("TO"))
+	if gFrom == "" {
+		gFrom = "1900-01-01T00:00:00"
+	}
+	if gTo == "" {
+		gTo = "2100-01-01T00:00:00"
+	}
+}
+
+func main() {
+	setupEnvs()
 	setupSHDB()
 	genReport(getSlugRoots())
 }
