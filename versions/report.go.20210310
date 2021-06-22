@@ -24,7 +24,6 @@ var (
 	gESURL string
 	gDB    *sqlx.DB
 	gOrg   string
-	gDbg   bool
 )
 
 // contributor name, email address, project slug and affiliation date range
@@ -64,15 +63,12 @@ func getIndices(res map[string]interface{}) (indices []string) {
 		if !strings.HasPrefix(idx, "sds-") {
 			continue
 		}
-		if strings.HasSuffix(idx, "-raw") || strings.HasSuffix(idx, "-for-merge") || strings.HasSuffix(idx, "-cache") || strings.HasSuffix(idx, "-converted") || strings.HasSuffix(idx, "-temp") {
+		if strings.HasSuffix(idx, "-raw") || strings.HasSuffix(idx, "-for-merge") {
 			continue
 		}
 		indices = append(indices, idx)
 	}
 	sort.Strings(indices)
-	if gDbg {
-		fmt.Printf("indices: %v\n", indices)
-	}
 	return
 }
 
@@ -83,8 +79,7 @@ func getRoots(indices, aliases []string) (roots []string) {
 	for _, idx := range indices {
 		ary := strings.Split(idx, "-")
 		lAry := len(ary)
-		ds := ary[lAry-1]
-		dss[ds] = struct{}{}
+		dss[ary[lAry-1]] = struct{}{}
 		root := strings.Join(ary[1:lAry-1], "-")
 		if strings.HasSuffix(root, "-github") {
 			root = root[:len(root)-7]
@@ -97,8 +92,7 @@ func getRoots(indices, aliases []string) (roots []string) {
 	for _, idx := range aliases {
 		ary := strings.Split(idx, "-")
 		lAry := len(ary)
-		ds := ary[lAry-1]
-		dss[ds] = struct{}{}
+		dss[ary[lAry-1]] = struct{}{}
 		root := strings.Join(ary[1:lAry-1], "-")
 		if strings.HasSuffix(root, "-github") {
 			root = root[:len(root)-7]
@@ -112,19 +106,8 @@ func getRoots(indices, aliases []string) (roots []string) {
 	for root := range all {
 		roots = append(roots, root)
 	}
-	if gDbg {
-		dsa := []string{}
-		for ds := range dss {
-			dsa = append(dsa, ds)
-		}
-		sort.Strings(dsa)
-		fmt.Printf("data source types: %v\n", dsa)
-	}
 	sort.Strings(roots)
 	fmt.Printf("%d projects detected\n", len(roots))
-	if gDbg {
-		fmt.Printf("projects: %v\n", roots)
-	}
 	return
 }
 
@@ -521,7 +504,6 @@ func main() {
 	if gOrg == "" {
 		fatal("ORG must be set")
 	}
-	gDbg = os.Getenv("DBG") != ""
 	setupSHDB()
 	genReport(getSlugRoots())
 }
