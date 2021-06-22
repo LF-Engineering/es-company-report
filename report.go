@@ -28,6 +28,7 @@ var (
 	gFrom  string
 	gTo    string
 	gDbg   bool
+	gAll   map[string]struct{}
 )
 
 // contributor name, email address, project slug and affiliation date range
@@ -77,6 +78,7 @@ func getIndices(res map[string]interface{}) (indices []string) {
 			continue
 		}
 		indices = append(indices, idx)
+		gAll[idx] = struct{}{}
 	}
 	sort.Strings(indices)
 	if gDbg {
@@ -372,27 +374,7 @@ func enrichOtherMetrics(ch chan struct{}, mtx *sync.RWMutex, report *contribRepo
 		projectCond = "project = '" + subProject + "'"
 	}
 	method := "POST"
-	gitPattern := jsonEscape("sds-" + root + "-git")
-	data := fmt.Sprintf(
-		// FIXME: once da-ds git is eabled
-		// `{"query":"select count(distinct hash) as commits, sum(lines_added) as loc_added, sum(lines_removed) as loc_removed from \"%s\" where type = 'commit' and hash is not null and author_uuid = '%s' and %s","fetch_size":%d}`,
-		`{"query":"select count(distinct hash) as commits, sum(lines_added) as loc_added, sum(lines_removed) as loc_removed from \"%s\" where hash is not null and author_uuid = '%s' and %s","fetch_size":%d}`,
-		gitPattern,
-		uuid,
-		projectCond,
-		10000,
-	)
-	payloadBytes := []byte(data)
-	payloadBody := bytes.NewReader(payloadBytes)
 	url := gESURL + "/_sql?format=json"
-	req, err := http.NewRequest(method, url, payloadBody)
-	fatalError(err)
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
-	fatalError(err)
-	body, err := ioutil.ReadAll(resp.Body)
-	fatalError(err)
-	_ = resp.Body.Close()
 	type resultType struct {
 		Cursor string          `json:"cursor"`
 		Rows   [][]interface{} `json:"rows"`
@@ -402,83 +384,99 @@ func enrichOtherMetrics(ch chan struct{}, mtx *sync.RWMutex, report *contribRepo
 		} `json:"error"`
 	}
 	var result resultType
-	err = jsoniter.Unmarshal(body, &result)
-	fatalError(err)
-	if result.Error.Type != "" || result.Error.Reason != "" {
-		fmt.Printf("error for %s/%s: %v\n", gitPattern, uuid, result.Error)
-		return
+	githubPattern := jsonEscape("sds-" + root + "-github-issue")
+	processGit := func() {
+		gitPattern := jsonEscape("sds-" + root + "-git")
+		_, ok := gAll[gitPattern]
+		if !ok {
+			return
+		}
+		data := fmt.Sprintf(
+			// FIXME: once da-ds git is eabled
+			// `{"query":"select count(distinct hash) as commits, sum(lines_added) as loc_added, sum(lines_removed) as loc_removed from \"%s\" where type = 'commit' and hash is not null and author_uuid = '%s' and %s","fetch_size":%d}`,
+			`{"query":"select count(distinct hash) as commits, sum(lines_added) as loc_added, sum(lines_removed) as loc_removed from \"%s\" where hash is not null and author_uuid = '%s' and %s","fetch_size":%d}`,
+			gitPattern,
+			uuid,
+			projectCond,
+			10000,
+		)
+		payloadBytes := []byte(data)
+		payloadBody := bytes.NewReader(payloadBytes)
+		req, err := http.NewRequest(method, url, payloadBody)
+		fatalError(err)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		fatalError(err)
+		body, err := ioutil.ReadAll(resp.Body)
+		fatalError(err)
+		_ = resp.Body.Close()
+		err = jsoniter.Unmarshal(body, &result)
+		fatalError(err)
+		if result.Error.Type != "" || result.Error.Reason != "" {
+			fmt.Printf("error for %s/%s: %v\n", gitPattern, uuid, result.Error)
+			return
+		}
+		if len(result.Rows) == 0 {
+			return
+		}
+		for _, row := range result.Rows {
+			// [0 <nil> <nil>] or [159 9097 2295]
+			fCommits, _ := row[0].(float64)
+			fLOCAdded, _ := row[1].(float64)
+			fLOCDeleted, _ := row[2].(float64)
+			commits := int(fCommits)
+			locAdded := int(fLOCAdded)
+			locDeleted := int(fLOCDeleted)
+			mtx.Lock()
+			report.items[idx].commits = commits
+			report.items[idx].locAdded = locAdded
+			report.items[idx].locDeleted = locDeleted
+			mtx.Unlock()
+		}
 	}
-	if len(result.Rows) == 0 {
-		return
+	processGitHubPR := func() {
+		_, ok := gAll[githubPattern]
+		if !ok {
+			return
+		}
+		data := fmt.Sprintf(
+			`{"query":"select count(distinct id) as pr_activity from \"%s\" where type in ('pull_request', 'pull_request_review', 'pull_request_comment') and (author_uuid = '%s' or merged_by_data_uuid = '%s') and %s","fetch_size":%d}`,
+			githubPattern,
+			uuid,
+			uuid,
+			projectCond,
+			10000,
+		)
+		payloadBytes := []byte(data)
+		payloadBody := bytes.NewReader(payloadBytes)
+		req, err := http.NewRequest(method, url, payloadBody)
+		fatalError(err)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		fatalError(err)
+		body, err := ioutil.ReadAll(resp.Body)
+		fatalError(err)
+		_ = resp.Body.Close()
+		err = jsoniter.Unmarshal(body, &result)
+		fatalError(err)
+		if result.Error.Type != "" || result.Error.Reason != "" {
+			fmt.Printf("error for %s/%s: %v\n", githubPattern, uuid, result.Error)
+			return
+		}
+		if len(result.Rows) == 0 {
+			return
+		}
+		for _, row := range result.Rows {
+			// [0] or [<nil>]
+			fAct, _ := row[0].(float64)
+			act := int(fAct)
+			mtx.Lock()
+			report.items[idx].prAct = act
+			mtx.Unlock()
+		}
 	}
-	for _, row := range result.Rows {
-		// [0 <nil> <nil>] or [159 9097 2295]
-		fCommits, _ := row[0].(float64)
-		fLOCAdded, _ := row[1].(float64)
-		fLOCDeleted, _ := row[2].(float64)
-		commits := int(fCommits)
-		locAdded := int(fLOCAdded)
-		locDeleted := int(fLOCDeleted)
-		mtx.Lock()
-		report.items[idx].commits = commits
-		report.items[idx].locAdded = locAdded
-		report.items[idx].locDeleted = locDeleted
-		mtx.Unlock()
-	}
-	// xxx
-	gitPattern := jsonEscape("sds-" + root + "-git")
-	data := fmt.Sprintf(
-		// FIXME: once da-ds git is eabled
-		// `{"query":"select count(distinct hash) as commits, sum(lines_added) as loc_added, sum(lines_removed) as loc_removed from \"%s\" where type = 'commit' and hash is not null and author_uuid = '%s' and %s","fetch_size":%d}`,
-		`{"query":"select count(distinct hash) as commits, sum(lines_added) as loc_added, sum(lines_removed) as loc_removed from \"%s\" where hash is not null and author_uuid = '%s' and %s","fetch_size":%d}`,
-		gitPattern,
-		uuid,
-		projectCond,
-		10000,
-	)
-	payloadBytes := []byte(data)
-	payloadBody := bytes.NewReader(payloadBytes)
-	url := gESURL + "/_sql?format=json"
-	req, err := http.NewRequest(method, url, payloadBody)
-	fatalError(err)
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
-	fatalError(err)
-	body, err := ioutil.ReadAll(resp.Body)
-	fatalError(err)
-	_ = resp.Body.Close()
-	type resultType struct {
-		Cursor string          `json:"cursor"`
-		Rows   [][]interface{} `json:"rows"`
-		Error  struct {
-			Type   string `json:"type"`
-			Reason string `json:"reason"`
-		} `json:"error"`
-	}
-	var result resultType
-	err = jsoniter.Unmarshal(body, &result)
-	fatalError(err)
-	if result.Error.Type != "" || result.Error.Reason != "" {
-		fmt.Printf("error for %s/%s: %v\n", gitPattern, uuid, result.Error)
-		return
-	}
-	if len(result.Rows) == 0 {
-		return
-	}
-	for _, row := range result.Rows {
-		// [0 <nil> <nil>] or [159 9097 2295]
-		fCommits, _ := row[0].(float64)
-		fLOCAdded, _ := row[1].(float64)
-		fLOCDeleted, _ := row[2].(float64)
-		commits := int(fCommits)
-		locAdded := int(fLOCAdded)
-		locDeleted := int(fLOCDeleted)
-		mtx.Lock()
-		report.items[idx].commits = commits
-		report.items[idx].locAdded = locAdded
-		report.items[idx].locDeleted = locDeleted
-		mtx.Unlock()
-	}
+	processGit()
+	processGitHubPR()
 }
 
 func enrichReport(report *contribReport) {
@@ -576,7 +574,7 @@ func enrichReport(report *contribReport) {
 
 func summaryReport(report *contribReport) {
 	// Summary is for all projects combined
-	// name,email,project,sub_project,contributions,commits,loc_added,loc_deleted,from,to,uuid -> name,email,contributions,commits,loc_added,loc_deleted,from,to,uuid
+	// name,email,project,sub_project,contributions,commits,loc_added,loc_deleted,pr_activity,issue_activity,from,to,uuid -> name,email,contributions,commits,loc_added,loc_deleted,pr_activity,issue_activity,from,to,uuid
 	report.summary = make(map[string]contribReportItem)
 	for _, item := range report.items {
 		uuid := item.uuid
@@ -592,6 +590,7 @@ func summaryReport(report *contribReport) {
 		sItem.commits += item.commits
 		sItem.locAdded += item.locAdded
 		sItem.locDeleted += item.locDeleted
+		sItem.prAct += item.prAct
 		if sItem.from.After(item.from) {
 			sItem.from = item.from
 		}
@@ -605,7 +604,21 @@ func summaryReport(report *contribReport) {
 func saveReport(report []contribReportItem) {
 	rows := [][]string{}
 	for _, item := range report {
-		row := []string{item.name, item.email, item.project, item.subProject, strconv.Itoa(item.n), strconv.Itoa(item.commits), strconv.Itoa(item.locAdded), strconv.Itoa(item.locDeleted), toMDYDate(item.from), toMDYDate(item.to), item.uuid}
+		row := []string{
+			item.name,
+			item.email,
+			item.project,
+			item.subProject,
+			strconv.Itoa(item.n),
+			strconv.Itoa(item.commits),
+			strconv.Itoa(item.locAdded),
+			strconv.Itoa(item.locDeleted),
+			strconv.Itoa(item.prAct),
+			strconv.Itoa(item.issueAct),
+			toMDYDate(item.from),
+			toMDYDate(item.to),
+			item.uuid,
+		}
 		rows = append(rows, row)
 	}
 	sort.Slice(
@@ -629,7 +642,7 @@ func saveReport(report []contribReportItem) {
 	defer func() { _ = file.Close() }()
 	writer = csv.NewWriter(file)
 	defer writer.Flush()
-	fatalError(writer.Write([]string{"name", "email", "project", "sub_project", "contributions", "commits", "loc_added", "loc_deleted", "from", "to", "uuid"}))
+	fatalError(writer.Write([]string{"name", "email", "project", "sub_project", "contributions", "commits", "loc_added", "loc_deleted", "pr_activity", "issue_activity", "from", "to", "uuid"}))
 	for _, row := range rows {
 		fatalError(writer.Write(row))
 	}
@@ -638,7 +651,19 @@ func saveReport(report []contribReportItem) {
 func saveSummaryReport(report map[string]contribReportItem) {
 	rows := [][]string{}
 	for _, item := range report {
-		row := []string{item.name, item.email, strconv.Itoa(item.n), strconv.Itoa(item.commits), strconv.Itoa(item.locAdded), strconv.Itoa(item.locDeleted), toMDYDate(item.from), toMDYDate(item.to), item.uuid}
+		row := []string{
+			item.name,
+			item.email,
+			strconv.Itoa(item.n),
+			strconv.Itoa(item.commits),
+			strconv.Itoa(item.locAdded),
+			strconv.Itoa(item.locDeleted),
+			strconv.Itoa(item.prAct),
+			strconv.Itoa(item.issueAct),
+			toMDYDate(item.from),
+			toMDYDate(item.to),
+			item.uuid,
+		}
 		rows = append(rows, row)
 	}
 	sort.Slice(
@@ -662,7 +687,7 @@ func saveSummaryReport(report map[string]contribReportItem) {
 	defer func() { _ = file.Close() }()
 	writer = csv.NewWriter(file)
 	defer writer.Flush()
-	fatalError(writer.Write([]string{"name", "email", "contributions", "commits", "loc_added", "loc_deleted", "from", "to", "uuid"}))
+	fatalError(writer.Write([]string{"name", "email", "contributions", "commits", "loc_added", "loc_deleted", "pr_activity", "issue_activity", "from", "to", "uuid"}))
 	for _, row := range rows {
 		fatalError(writer.Write(row))
 	}
@@ -729,6 +754,7 @@ func setupEnvs() {
 	if gTo == "" {
 		gTo = "2100-01-01T00:00:00"
 	}
+	gAll = make(map[string]struct{})
 }
 
 func main() {
