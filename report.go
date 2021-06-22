@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jmoiron/sqlx"
@@ -39,6 +40,12 @@ type contribReportItem struct {
 	n          int
 	from       time.Time
 	to         time.Time
+	root       string
+	commits    int
+	locAdded   int
+	locDeleted int
+	prAct      int
+	issueAct   int
 }
 type contribReport struct {
 	items   []contribReportItem
@@ -229,7 +236,8 @@ func reportForRoot(ch chan []contribReportItem, root string) (items []contribRep
 	pattern := jsonEscape("sds-" + root + "-*,-*-raw,-*-for-merge,-*-cache,-*-converted,-*-temp")
 	method := "POST"
 	data := fmt.Sprintf(
-		`{"query":"select author_uuid, count(*) as cnt, min(metadata__updated_on) as f, max(metadata__updated_on) as t, project from \"%s\" where author_org_name = '%s' and metadata__updated_on >= '%s' and metadata__updated_on < '%s' group by author_uuid, project","fetch_size":%d}`,
+		`{"query":"select author_uuid, count(*) as cnt, min(metadata__updated_on) as f, max(metadata__updated_on) as t, project from \"%s\" `+
+			`where author_org_name = '%s' and metadata__updated_on >= '%s' and metadata__updated_on < '%s' group by author_uuid, project","fetch_size":%d}`,
 		pattern,
 		gOrg,
 		gFrom,
@@ -250,10 +258,21 @@ func reportForRoot(ch chan []contribReportItem, root string) (items []contribRep
 	type resultType struct {
 		Cursor string          `json:"cursor"`
 		Rows   [][]interface{} `json:"rows"`
+		Error  struct {
+			Type   string `json:"type"`
+			Reason string `json:"reason"`
+		} `json:"error"`
 	}
 	var result resultType
 	err = jsoniter.Unmarshal(body, &result)
 	fatalError(err)
+	if result.Error.Type != "" || result.Error.Reason != "" {
+		// Error in this case is allowed
+		if gDbg {
+			fmt.Printf("error for %s: %v\n", pattern, result.Error)
+		}
+		return
+	}
 	if len(result.Rows) == 0 {
 		return
 	}
@@ -276,13 +295,18 @@ func reportForRoot(ch chan []contribReportItem, root string) (items []contribRep
 				to:         to,
 				project:    sfName,
 				subProject: subProject,
+				root:       root,
 			}
 			items = append(items, item)
 		}
 	}
 	processResults()
 	for {
+		if result.Cursor == "" {
+			break
+		}
 		data = `{"cursor":"` + result.Cursor + `"}`
+		//fmt.Printf("data=%s\n", data)
 		payloadBytes = []byte(data)
 		payloadBody = bytes.NewReader(payloadBytes)
 		req, err = http.NewRequest(method, url, payloadBody)
@@ -294,10 +318,17 @@ func reportForRoot(ch chan []contribReportItem, root string) (items []contribRep
 		fatalError(err)
 		err = jsoniter.Unmarshal(body, &result)
 		fatalError(err)
+		if result.Error.Type != "" || result.Error.Reason != "" {
+			fmt.Printf("error for %s: %v\n", pattern, result.Error)
+			break
+		}
 		if len(result.Rows) == 0 {
 			break
 		}
 		processResults()
+	}
+	if result.Cursor == "" {
+		return
 	}
 	url = gESURL + "/_sql/close"
 	data = `{"cursor":"` + result.Cursor + `"}`
@@ -320,71 +351,232 @@ func reportForRoot(ch chan []contribReportItem, root string) (items []contribRep
 	return
 }
 
-func enrichReport(report *contribReport) {
-	uuids := make(map[string][]string)
-	for _, item := range report.items {
-		uuids[item.uuid] = []string{}
+func enrichOtherMetrics(ch chan struct{}, mtx *sync.RWMutex, report *contribReport, idx int) {
+	defer func() {
+		ch <- struct{}{}
+	}()
+	// other items:
+	// commits, loc_added, loc_deleted
+	// prAct: total PR Activity (PRs submitted + reviewed + approved + merged + review comments + PR comments)
+	// issueAct: total Issue Activity (issues submitted + issues closed + issue comments)
+	mtx.RLock()
+	item := report.items[idx]
+	root := item.root
+	uuid := item.uuid
+	subProject := item.subProject
+	mtx.RUnlock()
+	var projectCond string
+	if subProject == "" {
+		projectCond = "(project = '' or project is null)"
+	} else {
+		projectCond = "project = '" + subProject + "'"
 	}
-	nUUIDs := len(uuids)
-	if nUUIDs == 0 {
+	method := "POST"
+	gitPattern := jsonEscape("sds-" + root + "-git")
+	data := fmt.Sprintf(
+		// FIXME: once da-ds git is eabled
+		// `{"query":"select count(distinct hash) as commits, sum(lines_added) as loc_added, sum(lines_removed) as loc_removed from \"%s\" where type = 'commit' and hash is not null and author_uuid = '%s' and %s","fetch_size":%d}`,
+		`{"query":"select count(distinct hash) as commits, sum(lines_added) as loc_added, sum(lines_removed) as loc_removed from \"%s\" where hash is not null and author_uuid = '%s' and %s","fetch_size":%d}`,
+		gitPattern,
+		uuid,
+		projectCond,
+		10000,
+	)
+	payloadBytes := []byte(data)
+	payloadBody := bytes.NewReader(payloadBytes)
+	url := gESURL + "/_sql?format=json"
+	req, err := http.NewRequest(method, url, payloadBody)
+	fatalError(err)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	fatalError(err)
+	body, err := ioutil.ReadAll(resp.Body)
+	fatalError(err)
+	_ = resp.Body.Close()
+	type resultType struct {
+		Cursor string          `json:"cursor"`
+		Rows   [][]interface{} `json:"rows"`
+		Error  struct {
+			Type   string `json:"type"`
+			Reason string `json:"reason"`
+		} `json:"error"`
+	}
+	var result resultType
+	err = jsoniter.Unmarshal(body, &result)
+	fatalError(err)
+	if result.Error.Type != "" || result.Error.Reason != "" {
+		fmt.Printf("error for %s/%s: %v\n", gitPattern, uuid, result.Error)
 		return
 	}
-	uuidsAry := []string{}
-	for uuid := range uuids {
-		uuidsAry = append(uuidsAry, uuid)
+	if len(result.Rows) == 0 {
+		return
 	}
-	packSize := 1000
-	nPacks := nUUIDs / packSize
-	if nUUIDs%packSize != 0 {
-		nPacks++
+	for _, row := range result.Rows {
+		// [0 <nil> <nil>] or [159 9097 2295]
+		fCommits, _ := row[0].(float64)
+		fLOCAdded, _ := row[1].(float64)
+		fLOCDeleted, _ := row[2].(float64)
+		commits := int(fCommits)
+		locAdded := int(fLOCAdded)
+		locDeleted := int(fLOCDeleted)
+		mtx.Lock()
+		report.items[idx].commits = commits
+		report.items[idx].locAdded = locAdded
+		report.items[idx].locDeleted = locDeleted
+		mtx.Unlock()
 	}
-	for i := 0; i < nPacks; i++ {
-		from := i * packSize
-		to := from + packSize
-		if to > nUUIDs {
-			to = nUUIDs
-		}
-		args := []interface{}{}
-		query := "select uuid, name, email from profiles where uuid in("
-		for _, uuid := range uuidsAry[from:to] {
-			query += "?,"
-			args = append(args, uuid)
-		}
-		query = query[:len(query)-1] + ")"
-		rows, err := gDB.Query(query, args...)
-		fatalError(err)
-		var (
-			uuid   string
-			pName  *string
-			pEmail *string
-		)
-		for rows.Next() {
-			err = rows.Scan(&uuid, &pName, &pEmail)
-			fatalError(err)
-			name, email := "", ""
-			if pName != nil {
-				name = *pName
-			}
-			if pEmail != nil {
-				email = *pEmail
-			}
-			uuids[uuid] = []string{name, email}
-		}
-		fatalError(rows.Err())
-		fatalError(rows.Close())
+	// xxx
+	gitPattern := jsonEscape("sds-" + root + "-git")
+	data := fmt.Sprintf(
+		// FIXME: once da-ds git is eabled
+		// `{"query":"select count(distinct hash) as commits, sum(lines_added) as loc_added, sum(lines_removed) as loc_removed from \"%s\" where type = 'commit' and hash is not null and author_uuid = '%s' and %s","fetch_size":%d}`,
+		`{"query":"select count(distinct hash) as commits, sum(lines_added) as loc_added, sum(lines_removed) as loc_removed from \"%s\" where hash is not null and author_uuid = '%s' and %s","fetch_size":%d}`,
+		gitPattern,
+		uuid,
+		projectCond,
+		10000,
+	)
+	payloadBytes := []byte(data)
+	payloadBody := bytes.NewReader(payloadBytes)
+	url := gESURL + "/_sql?format=json"
+	req, err := http.NewRequest(method, url, payloadBody)
+	fatalError(err)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	fatalError(err)
+	body, err := ioutil.ReadAll(resp.Body)
+	fatalError(err)
+	_ = resp.Body.Close()
+	type resultType struct {
+		Cursor string          `json:"cursor"`
+		Rows   [][]interface{} `json:"rows"`
+		Error  struct {
+			Type   string `json:"type"`
+			Reason string `json:"reason"`
+		} `json:"error"`
 	}
-	for i, item := range report.items {
-		data, ok := uuids[item.uuid]
-		if !ok || (ok && len(data) == 0) {
-			fmt.Printf("uuid %s not found in the database\n", item.uuid)
-			continue
-		}
-		report.items[i].name = data[0]
-		report.items[i].email = data[1]
+	var result resultType
+	err = jsoniter.Unmarshal(body, &result)
+	fatalError(err)
+	if result.Error.Type != "" || result.Error.Reason != "" {
+		fmt.Printf("error for %s/%s: %v\n", gitPattern, uuid, result.Error)
+		return
+	}
+	if len(result.Rows) == 0 {
+		return
+	}
+	for _, row := range result.Rows {
+		// [0 <nil> <nil>] or [159 9097 2295]
+		fCommits, _ := row[0].(float64)
+		fLOCAdded, _ := row[1].(float64)
+		fLOCDeleted, _ := row[2].(float64)
+		commits := int(fCommits)
+		locAdded := int(fLOCAdded)
+		locDeleted := int(fLOCDeleted)
+		mtx.Lock()
+		report.items[idx].commits = commits
+		report.items[idx].locAdded = locAdded
+		report.items[idx].locDeleted = locDeleted
+		mtx.Unlock()
 	}
 }
 
+func enrichReport(report *contribReport) {
+	mtx := &sync.RWMutex{}
+	shCh := make(chan struct{})
+	go func(ch chan struct{}) {
+		defer func() {
+			ch <- struct{}{}
+		}()
+		uuids := make(map[string][]string)
+		for _, item := range report.items {
+			uuids[item.uuid] = []string{}
+		}
+		nUUIDs := len(uuids)
+		if nUUIDs == 0 {
+			return
+		}
+		uuidsAry := []string{}
+		for uuid := range uuids {
+			uuidsAry = append(uuidsAry, uuid)
+		}
+		packSize := 1000
+		nPacks := nUUIDs / packSize
+		if nUUIDs%packSize != 0 {
+			nPacks++
+		}
+		for i := 0; i < nPacks; i++ {
+			from := i * packSize
+			to := from + packSize
+			if to > nUUIDs {
+				to = nUUIDs
+			}
+			args := []interface{}{}
+			query := "select uuid, name, email from profiles where uuid in("
+			for _, uuid := range uuidsAry[from:to] {
+				query += "?,"
+				args = append(args, uuid)
+			}
+			query = query[:len(query)-1] + ")"
+			rows, err := gDB.Query(query, args...)
+			fatalError(err)
+			var (
+				uuid   string
+				pName  *string
+				pEmail *string
+			)
+			for rows.Next() {
+				err = rows.Scan(&uuid, &pName, &pEmail)
+				fatalError(err)
+				name, email := "", ""
+				if pName != nil {
+					name = *pName
+				}
+				if pEmail != nil {
+					email = *pEmail
+				}
+				uuids[uuid] = []string{name, email}
+			}
+			fatalError(rows.Err())
+			fatalError(rows.Close())
+		}
+		for i, item := range report.items {
+			data, ok := uuids[item.uuid]
+			if !ok || (ok && len(data) == 0) {
+				fmt.Printf("uuid %s not found in the database\n", item.uuid)
+				continue
+			}
+			mtx.Lock()
+			report.items[i].name = data[0]
+			report.items[i].email = data[1]
+			mtx.Unlock()
+		}
+	}(shCh)
+	// Enrich other per-author metrics
+	thrN := runtime.NumCPU()
+	if thrN > 12 {
+		thrN = 12
+	}
+	ch := make(chan struct{})
+	nThreads := 0
+	for i := range report.items {
+		go enrichOtherMetrics(ch, mtx, report, i)
+		nThreads++
+		if nThreads == thrN {
+			<-ch
+			nThreads--
+		}
+	}
+	for nThreads > 0 {
+		<-ch
+		nThreads--
+	}
+	<-shCh
+}
+
 func summaryReport(report *contribReport) {
+	// Summary is for all projects combined
+	// name,email,project,sub_project,contributions,commits,loc_added,loc_deleted,from,to,uuid -> name,email,contributions,commits,loc_added,loc_deleted,from,to,uuid
 	report.summary = make(map[string]contribReportItem)
 	for _, item := range report.items {
 		uuid := item.uuid
@@ -397,6 +589,9 @@ func summaryReport(report *contribReport) {
 			continue
 		}
 		sItem.n += item.n
+		sItem.commits += item.commits
+		sItem.locAdded += item.locAdded
+		sItem.locDeleted += item.locDeleted
 		if sItem.from.After(item.from) {
 			sItem.from = item.from
 		}
@@ -410,7 +605,7 @@ func summaryReport(report *contribReport) {
 func saveReport(report []contribReportItem) {
 	rows := [][]string{}
 	for _, item := range report {
-		row := []string{item.name, item.email, item.project, item.subProject, strconv.Itoa(item.n), toMDYDate(item.from), toMDYDate(item.to), item.uuid}
+		row := []string{item.name, item.email, item.project, item.subProject, strconv.Itoa(item.n), strconv.Itoa(item.commits), strconv.Itoa(item.locAdded), strconv.Itoa(item.locDeleted), toMDYDate(item.from), toMDYDate(item.to), item.uuid}
 		rows = append(rows, row)
 	}
 	sort.Slice(
@@ -434,7 +629,7 @@ func saveReport(report []contribReportItem) {
 	defer func() { _ = file.Close() }()
 	writer = csv.NewWriter(file)
 	defer writer.Flush()
-	fatalError(writer.Write([]string{"name", "email", "project", "sub_project", "contributions", "from", "to", "uuid"}))
+	fatalError(writer.Write([]string{"name", "email", "project", "sub_project", "contributions", "commits", "loc_added", "loc_deleted", "from", "to", "uuid"}))
 	for _, row := range rows {
 		fatalError(writer.Write(row))
 	}
@@ -443,7 +638,7 @@ func saveReport(report []contribReportItem) {
 func saveSummaryReport(report map[string]contribReportItem) {
 	rows := [][]string{}
 	for _, item := range report {
-		row := []string{item.name, item.email, strconv.Itoa(item.n), toMDYDate(item.from), toMDYDate(item.to), item.uuid}
+		row := []string{item.name, item.email, strconv.Itoa(item.n), strconv.Itoa(item.commits), strconv.Itoa(item.locAdded), strconv.Itoa(item.locDeleted), toMDYDate(item.from), toMDYDate(item.to), item.uuid}
 		rows = append(rows, row)
 	}
 	sort.Slice(
@@ -467,7 +662,7 @@ func saveSummaryReport(report map[string]contribReportItem) {
 	defer func() { _ = file.Close() }()
 	writer = csv.NewWriter(file)
 	defer writer.Flush()
-	fatalError(writer.Write([]string{"name", "email", "contributions", "from", "to", "uuid"}))
+	fatalError(writer.Write([]string{"name", "email", "contributions", "commits", "loc_added", "loc_deleted", "from", "to", "uuid"}))
 	for _, row := range rows {
 		fatalError(writer.Write(row))
 	}
