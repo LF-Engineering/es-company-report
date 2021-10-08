@@ -91,7 +91,7 @@ type datalakePRReportItem struct {
 	dataSource  string
 	projectSlug string
 	createdAt   time.Time
-	actionType  string // all possible doc types from github-issue (PRs only) and gerrit
+	actionType  string // all possible doc types from github-issue (PRs only) and gerrit, also detecting approvals/rejections/merges
 	filtered    bool
 }
 
@@ -533,11 +533,13 @@ func datalakeGithubPRReportForRoot(root, projectSlug string, overrideProjectSlug
 			if actionType == "pull_request_review" {
 				switch state {
 				case "APPROVED":
-					actionType = "PR approved"
+					actionType = "GitHub PR approved"
 				case "CHANGES_REQUESTED":
-					actionType = "PR changes requested"
+					actionType = "GitHub PR changes requested"
 				case "COMMENTED":
-					actionType = "PR review comment"
+					actionType = "GitHub PR review comment"
+				case "DISMISSED":
+					actionType = "GitHub PR dismissed"
 				}
 			}
 			if identityID == mergeIdentityID {
@@ -667,9 +669,9 @@ func datalakeGerritReviewReportForRoot(root, projectSlug string, overrideProject
 			// fmt.Printf("(%s,%s)\n", actionType, approvalValue)
 			if actionType == "approval" {
 				switch approvalValue {
-				case "-1", "-2":
+				case "-1", "-2", "-3":
 					actionType = "Gerrit review rejected"
-				case "0", "1", "2":
+				case "0", "1", "2", "3":
 					actionType = "Gerrit review approved"
 				}
 			}
@@ -705,6 +707,125 @@ func datalakeGerritReviewReportForRoot(root, projectSlug string, overrideProject
 		fatalError(err)
 		if result.Error.Type != "" || result.Error.Reason != "" {
 			fmt.Printf("datalakeGerritReviewReportForRoot: error for %s: %v\n", pattern, result.Error)
+			break
+		}
+		if len(result.Rows) == 0 {
+			break
+		}
+		processResults()
+	}
+	if result.Cursor == "" {
+		return
+	}
+	url = gESURL + "/_sql/close"
+	data = `{"cursor":"` + result.Cursor + `"}`
+	payloadBytes = []byte(data)
+	payloadBody = bytes.NewReader(payloadBytes)
+	req, err = http.NewRequest(method, url, payloadBody)
+	fatalError(err)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err = http.DefaultClient.Do(req)
+	fatalError(err)
+	body, err = ioutil.ReadAll(resp.Body)
+	fatalError(err)
+	_ = resp.Body.Close()
+	return
+}
+
+// subrep
+func datalakeGithubIssueReportForRoot(root, projectSlug string, overrideProjectSlug bool) (issueItems []datalakeIssueReportItem) {
+	if gDbg {
+		defer func() {
+			fmt.Printf("got github-issue %s: %v\n", root, issueItems)
+		}()
+	}
+	pattern := jsonEscape("sds-" + root + "-github-issue,sds-" + root + "-github-issue-*,-*-raw,-*-for-merge,-*-cache,-*-converted,-*-temp,-*-last-action-date-cache")
+	method := "POST"
+	data := fmt.Sprintf(
+		`{"query":"select uuid, author_id, project_slug, metadata__enriched_on, type from \"%s\" `+
+			`where author_id is not null and is_github_issue = 1","fetch_size":%d}`,
+		pattern,
+		10000,
+	)
+	payloadBytes := []byte(data)
+	payloadBody := bytes.NewReader(payloadBytes)
+	url := gESURL + "/_sql?format=json"
+	req, err := http.NewRequest(method, url, payloadBody)
+	fatalError(err)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	fatalError(err)
+	body, err := ioutil.ReadAll(resp.Body)
+	fatalError(err)
+	_ = resp.Body.Close()
+	type resultType struct {
+		Cursor string          `json:"cursor"`
+		Rows   [][]interface{} `json:"rows"`
+		Error  struct {
+			Type   string `json:"type"`
+			Reason string `json:"reason"`
+		} `json:"error"`
+	}
+	var result resultType
+	err = jsoniter.Unmarshal(body, &result)
+	fatalError(err)
+	if result.Error.Type != "" || result.Error.Reason != "" {
+		// Error in this case is allowed
+		if gDbg {
+			fmt.Printf("datalakeGitHubIssueReportForRoot: error for %s: %v\n", pattern, result.Error)
+		}
+		return
+	}
+	if len(result.Rows) == 0 {
+		return
+	}
+	var pSlug string
+	if overrideProjectSlug {
+		pSlug = projectSlug
+	}
+	processResults := func() {
+		for _, row := range result.Rows {
+			// [bdf57807ad938a88ba699da2bdf49bf851884dc9 d21d4c49184b31550fd6526863fb64894f437e64 hyperledger/sawtooth 2021-09-07T14:49:35.631Z issue_assignee]
+			// [9ff1f7e20274861e9415a5af8e7f330055a658f8 342fc492a4e5fd634c527bb09b3c079f0737e3cd ojsf/ojsf-nodejs 2021-09-07T06:22:45.628Z issue_comment]
+			documentID, _ := row[0].(string)
+			identityID, _ := row[1].(string)
+			if !overrideProjectSlug {
+				pSlug, _ = row[2].(string)
+			}
+			createdAt, _ := timeParseES(row[3].(string))
+			actionType, _ := row[4].(string)
+			item := datalakeIssueReportItem{
+				docID:       documentID,
+				identityID:  identityID,
+				dataSource:  "github/issue",
+				projectSlug: pSlug,
+				createdAt:   createdAt,
+				actionType:  actionType,
+				filtered:    false,
+			}
+			issueItems = append(issueItems, item)
+		}
+	}
+	processResults()
+	for {
+		if result.Cursor == "" {
+			break
+		}
+		data = `{"cursor":"` + result.Cursor + `"}`
+		//fmt.Printf("data=%s\n", data)
+		payloadBytes = []byte(data)
+		payloadBody = bytes.NewReader(payloadBytes)
+		req, err = http.NewRequest(method, url, payloadBody)
+		fatalError(err)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err = http.DefaultClient.Do(req)
+		fatalError(err)
+		body, err = ioutil.ReadAll(resp.Body)
+		fatalError(err)
+		err = jsoniter.Unmarshal(body, &result)
+		fatalError(err)
+		if result.Error.Type != "" || result.Error.Reason != "" {
+			fmt.Printf("datalakeGitHubIssueReportForRoot: error for %s: %v\n", pattern, result.Error)
 			break
 		}
 		if len(result.Rows) == 0 {
@@ -870,12 +991,20 @@ func datalakeReportForRoot(ch chan datalakeReport, root string, dataSourceTypes 
 			itemData.prItems = append(itemData.prItems, prItems...)
 		}
 	}
-	// xxx
-	/*
-		if bIssues {
-			itemData.issueItems = datalakeIssueReportForRoot(root, daName, found)
-		}
-	*/
+	if bIssues {
+		itemData.issueItems = datalakeGithubIssueReportForRoot(root, daName, found)
+		// xxx
+		/*
+			issueItems := datalakeJiraIssueReportForRoot(root, daName, found)
+			if len(issueItems) > 0 {
+				itemData.issueItems = append(itemData.issueItems, issueItems...)
+			}
+			issueItems := datalakeBugzillaIssueReportForRoot(root, daName, found)
+			if len(issueItems) > 0 {
+				itemData.issueItems = append(itemData.issueItems, issueItems...)
+			}
+		*/
+	}
 	return
 }
 
@@ -1391,6 +1520,7 @@ func saveSummaryOrgReport(report map[string]contribReportItem) {
 	}
 }
 
+// subrep
 func saveDatalakeLOCReport(report []datalakeLOCReportItem) {
 	rows := [][]string{}
 	for _, item := range report {
@@ -1431,20 +1561,25 @@ func saveDatalakeLOCReport(report []datalakeLOCReportItem) {
 func toIssueType(inType string) string {
 	// xxx
 	/*
-				  github-issue:
-				  jira:
-		      bugzilla:
-		      bugzillarest:
+			jira:
+		  comment
+		  issue
+			bugzilla:
+		  status
+			bugzillarest:
+		  status
 	*/
 	switch inType {
-	case "attachment":
-		return "Attachment added"
-	case "comment":
-		return "Commented"
-	case "new_page":
-		return "Page created"
-	case "page":
-		return "Page edited"
+	case "issue":
+		return "GitHub issue created"
+	case "issue_assignee":
+		return "GitHub issue assignment"
+	case "issue_comment":
+		return "GitHub issue comment"
+	case "issue_comment_reaction":
+		return "GitHub issue comment reaction"
+	case "issue_reaction":
+		return "GitHub issue reaction"
 	default:
 		return "?"
 	}
@@ -1453,20 +1588,22 @@ func toIssueType(inType string) string {
 func toPRType(inType string) string {
 	switch inType {
 	case "pull_request":
-		return "PR submitted"
+		return "GitHub PR submitted"
 	case "pull_request_assignee":
-		return "PR assignment"
+		return "GitHub PR assignment"
 	case "pull_request_comment":
-		return "PR comment"
+		return "GitHub PR comment"
 	case "pull_request_comment_reaction":
-		return "PR reaction"
+		return "GitHub PR reaction"
 	case "pull_request_requested_reviewer":
-		return "PR requested reviewer assignment"
+		return "GitHub PR requested reviewer assignment"
 	case "pull_request_review":
-		return "PR review"
-	case "PR approved", "PR changes requested", "PR review comment", "PR merged", "Gerrit review rejected", "Gerrit review approved":
+		// should not happen - we're splitting this into separate approval states
+		return "GitHub PR review"
+	case "GitHub PR approved", "GitHub PR changes requested", "GitHub PR review comment", "PR merged", "Gerrit review rejected", "Gerrit review approved":
 		return inType
 	case "approval":
+		// should not happen - we're splitting this into separate approval states
 		return "Gerrit approval added"
 	case "changeset":
 		return "Gerrit change set created"
@@ -1480,6 +1617,7 @@ func toPRType(inType string) string {
 	}
 }
 
+// subrep
 func saveDatalakePRsReport(report []datalakePRReportItem) {
 	rows := [][]string{}
 	for _, item := range report {
@@ -1516,6 +1654,7 @@ func saveDatalakePRsReport(report []datalakePRReportItem) {
 	}
 }
 
+// subrep
 func saveDatalakeIssuesReport(report []datalakeIssueReportItem) {
 	rows := [][]string{}
 	for _, item := range report {
@@ -1555,18 +1694,19 @@ func saveDatalakeIssuesReport(report []datalakeIssueReportItem) {
 func toDocType(inType string) string {
 	switch inType {
 	case "attachment":
-		return "Attachment added"
+		return "Confluence attachment added"
 	case "comment":
-		return "Commented"
+		return "Confluence page commented"
 	case "new_page":
-		return "Page created"
+		return "Confluence page created"
 	case "page":
-		return "Page edited"
+		return "Confluence page edited"
 	default:
 		return "?"
 	}
 }
 
+// subrep
 func saveDatalakeDocsReport(report []datalakeDocReportItem) {
 	rows := [][]string{}
 	for _, item := range report {
@@ -1606,7 +1746,10 @@ func saveDatalakeDocsReport(report []datalakeDocReportItem) {
 func genOrgReport(roots, dataSourceTypes []string) {
 	thrN := runtime.NumCPU()
 	// thrN = 1
-	// roots = roots[:10]
+	// roots = roots[:50]
+	if thrN > 20 {
+		thrN = 20
+	}
 	runtime.GOMAXPROCS(thrN)
 	ch := make(chan []contribReportItem)
 	report := contribReport{}
@@ -1802,8 +1945,11 @@ func genDatalakeReport(roots, dataSourceTypes []string) {
 	thrN := runtime.NumCPU()
 	// xxx
 	// thrN = 1
-	// roots = roots[:10]
+	roots = roots[:50]
 	// xxx
+	if thrN > 20 {
+		thrN = 20
+	}
 	runtime.GOMAXPROCS(thrN)
 	chIdentIDs := make(chan map[string]struct{})
 	go getAffiliatedNonBotIdentities(chIdentIDs)
