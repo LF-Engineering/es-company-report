@@ -32,7 +32,10 @@ var (
 	gDatasource map[string]struct{}
 	gSubReport  map[string]struct{}
 	gAll        map[string]struct{}
+	gDt         time.Time
 )
+
+var gDtMtx = &sync.Mutex{}
 
 // contributor name, email address, project slug and affiliation date range
 type contribReportItem struct {
@@ -140,6 +143,12 @@ func getIndices(res map[string]interface{}) (indices []string) {
 		if strings.HasSuffix(idx, "-raw") || strings.HasSuffix(idx, "-for-merge") || strings.HasSuffix(idx, "-cache") || strings.HasSuffix(idx, "-converted") || strings.HasSuffix(idx, "-temp") || strings.HasSuffix(idx, "-last-action-date-cache") {
 			continue
 		}
+		// to limit data processing while implementing
+		/*
+			if !strings.Contains(idx, "git") {
+				continue
+			}
+		*/
 		indices = append(indices, idx)
 		gAll[idx] = struct{}{}
 	}
@@ -349,7 +358,7 @@ func datalakeLOCReportForRoot(root, projectSlug string, overrideProjectSlug bool
 			fmt.Printf("got LOC %s: %v\n", root, locItems)
 		}()
 	}
-	pattern := jsonEscape("sds-" + root + "-git,sds-" + root + "-git-*,-*-raw,-*-for-merge,-*-cache,-*-converted,-*-temp,-*-last-action-date-cache")
+	pattern := jsonEscape("sds-" + root + "-git*,-*-github,-*-github-issue,-*-raw,-*-for-merge,-*-cache,-*-converted,-*-temp,-*-last-action-date-cache")
 	method := "POST"
 	data := fmt.Sprintf(
 		`{"query":"select uuid, author_id, project_slug, metadata__enriched_on, lines_added, lines_removed from \"%s\" `+
@@ -471,7 +480,7 @@ func datalakeGithubPRReportForRoot(root, projectSlug string, overrideProjectSlug
 			fmt.Printf("got github-pr %s: %v\n", root, prItems)
 		}()
 	}
-	pattern := jsonEscape("sds-" + root + "-github-issue,sds-" + root + "-github-issue-*,-*-raw,-*-for-merge,-*-cache,-*-converted,-*-temp,-*-last-action-date-cache")
+	pattern := jsonEscape("sds-" + root + "-github-issue*,-*-raw,-*-for-merge,-*-cache,-*-converted,-*-temp,-*-last-action-date-cache")
 	method := "POST"
 	data := fmt.Sprintf(
 		`{"query":"select uuid, author_id, project_slug, metadata__enriched_on, type, state, merged_by_data_id from \"%s\" `+
@@ -609,7 +618,7 @@ func datalakeGerritReviewReportForRoot(root, projectSlug string, overrideProject
 			fmt.Printf("got gerrit-review %s: %v\n", root, prItems)
 		}()
 	}
-	pattern := jsonEscape("sds-" + root + "-gerrit,sds-" + root + "-gerrit-*,-*-raw,-*-for-merge,-*-cache,-*-converted,-*-temp,-*-last-action-date-cache")
+	pattern := jsonEscape("sds-" + root + "-gerrit*,-*-raw,-*-for-merge,-*-cache,-*-converted,-*-temp,-*-last-action-date-cache")
 	method := "POST"
 	data := fmt.Sprintf(
 		`{"query":"select uuid, author_id, project_slug, metadata__enriched_on, type, approval_value from \"%s\" `+
@@ -739,7 +748,7 @@ func datalakeGithubIssueReportForRoot(root, projectSlug string, overrideProjectS
 			fmt.Printf("got github-issue %s: %v\n", root, issueItems)
 		}()
 	}
-	pattern := jsonEscape("sds-" + root + "-github-issue,sds-" + root + "-github-issue-*,-*-raw,-*-for-merge,-*-cache,-*-converted,-*-temp,-*-last-action-date-cache")
+	pattern := jsonEscape("sds-" + root + "-github-issue*,-*-raw,-*-for-merge,-*-cache,-*-converted,-*-temp,-*-last-action-date-cache")
 	method := "POST"
 	data := fmt.Sprintf(
 		`{"query":"select uuid, author_id, project_slug, metadata__enriched_on, type from \"%s\" `+
@@ -852,13 +861,251 @@ func datalakeGithubIssueReportForRoot(root, projectSlug string, overrideProjectS
 }
 
 // subrep
+func datalakeJiraIssueReportForRoot(root, projectSlug string, overrideProjectSlug bool) (issueItems []datalakeIssueReportItem) {
+	if gDbg {
+		defer func() {
+			fmt.Printf("got jira issue %s: %v\n", root, issueItems)
+		}()
+	}
+	pattern := jsonEscape("sds-" + root + "-jira*,-*-raw,-*-for-merge,-*-cache,-*-converted,-*-temp,-*-last-action-date-cache")
+	method := "POST"
+	// can also get status and/or status_category_key
+	data := fmt.Sprintf(
+		`{"query":"select uuid, author_id, project_slug, metadata__enriched_on, type from \"%s\" `+
+			`where author_id is not null","fetch_size":%d}`,
+		pattern,
+		10000,
+	)
+	payloadBytes := []byte(data)
+	payloadBody := bytes.NewReader(payloadBytes)
+	url := gESURL + "/_sql?format=json"
+	req, err := http.NewRequest(method, url, payloadBody)
+	fatalError(err)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	fatalError(err)
+	body, err := ioutil.ReadAll(resp.Body)
+	fatalError(err)
+	_ = resp.Body.Close()
+	type resultType struct {
+		Cursor string          `json:"cursor"`
+		Rows   [][]interface{} `json:"rows"`
+		Error  struct {
+			Type   string `json:"type"`
+			Reason string `json:"reason"`
+		} `json:"error"`
+	}
+	var result resultType
+	err = jsoniter.Unmarshal(body, &result)
+	fatalError(err)
+	if result.Error.Type != "" || result.Error.Reason != "" {
+		// Error in this case is allowed
+		if gDbg {
+			fmt.Printf("datalakeJiraIssueReportForRoot: error for %s: %v\n", pattern, result.Error)
+		}
+		return
+	}
+	if len(result.Rows) == 0 {
+		return
+	}
+	var pSlug string
+	if overrideProjectSlug {
+		pSlug = projectSlug
+	}
+	processResults := func() {
+		for _, row := range result.Rows {
+			// [3fc01f224df4430fa86a03aa7a7d581210e58f64 30f4c2f64cf70d52ed96b4e2fd7f46ae3b59c728 lfn/pnda 2021-09-07T05:42:55.185Z issue]
+			// [053c26541dd50c096e316a38feded0cb1225c051 e439d8d016a641d90ca408b9014afc675d55ad50 hyperledger/cello 2021-09-07T13:57:20.029Z comment]
+			documentID, _ := row[0].(string)
+			identityID, _ := row[1].(string)
+			if !overrideProjectSlug {
+				pSlug, _ = row[2].(string)
+			}
+			createdAt, _ := timeParseES(row[3].(string))
+			actionType, _ := row[4].(string)
+			// status, _ := row[5].(string)
+			item := datalakeIssueReportItem{
+				docID:       documentID,
+				identityID:  identityID,
+				dataSource:  "jira",
+				projectSlug: pSlug,
+				createdAt:   createdAt,
+				actionType:  "jira_" + actionType,
+				filtered:    false,
+			}
+			issueItems = append(issueItems, item)
+		}
+	}
+	processResults()
+	for {
+		if result.Cursor == "" {
+			break
+		}
+		data = `{"cursor":"` + result.Cursor + `"}`
+		//fmt.Printf("data=%s\n", data)
+		payloadBytes = []byte(data)
+		payloadBody = bytes.NewReader(payloadBytes)
+		req, err = http.NewRequest(method, url, payloadBody)
+		fatalError(err)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err = http.DefaultClient.Do(req)
+		fatalError(err)
+		body, err = ioutil.ReadAll(resp.Body)
+		fatalError(err)
+		err = jsoniter.Unmarshal(body, &result)
+		fatalError(err)
+		if result.Error.Type != "" || result.Error.Reason != "" {
+			fmt.Printf("datalakeJiraIssueReportForRoot: error for %s: %v\n", pattern, result.Error)
+			break
+		}
+		if len(result.Rows) == 0 {
+			break
+		}
+		processResults()
+	}
+	if result.Cursor == "" {
+		return
+	}
+	url = gESURL + "/_sql/close"
+	data = `{"cursor":"` + result.Cursor + `"}`
+	payloadBytes = []byte(data)
+	payloadBody = bytes.NewReader(payloadBytes)
+	req, err = http.NewRequest(method, url, payloadBody)
+	fatalError(err)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err = http.DefaultClient.Do(req)
+	fatalError(err)
+	body, err = ioutil.ReadAll(resp.Body)
+	fatalError(err)
+	_ = resp.Body.Close()
+	return
+}
+
+// subrep
+func datalakeBugzillaIssueReportForRoot(root, projectSlug string, overrideProjectSlug, rest bool) (issueItems []datalakeIssueReportItem) {
+	ds := "bugzilla"
+	if rest {
+		ds += "rest"
+	}
+	if gDbg {
+		defer func() {
+			fmt.Printf("got %s issue %s: %v\n", ds, root, issueItems)
+		}()
+	}
+	pattern := jsonEscape("sds-" + root + "-" + ds + "*,-*-raw,-*-for-merge,-*-cache,-*-converted,-*-temp,-*-last-action-date-cache")
+	method := "POST"
+	// can also get status and/or status_category_key
+	data := fmt.Sprintf(
+		`{"query":"select uuid, author_id, metadata__enriched_on, status from \"%s\" `+
+			`where author_id is not null","fetch_size":%d}`,
+		pattern,
+		10000,
+	)
+	payloadBytes := []byte(data)
+	payloadBody := bytes.NewReader(payloadBytes)
+	url := gESURL + "/_sql?format=json"
+	req, err := http.NewRequest(method, url, payloadBody)
+	fatalError(err)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	fatalError(err)
+	body, err := ioutil.ReadAll(resp.Body)
+	fatalError(err)
+	_ = resp.Body.Close()
+	type resultType struct {
+		Cursor string          `json:"cursor"`
+		Rows   [][]interface{} `json:"rows"`
+		Error  struct {
+			Type   string `json:"type"`
+			Reason string `json:"reason"`
+		} `json:"error"`
+	}
+	var result resultType
+	err = jsoniter.Unmarshal(body, &result)
+	fatalError(err)
+	if result.Error.Type != "" || result.Error.Reason != "" {
+		// Error in this case is allowed
+		if gDbg {
+			fmt.Printf("datalakeBugzillaIssueReportForRoot: error for %s: %v\n", pattern, result.Error)
+		}
+		return
+	}
+	if len(result.Rows) == 0 {
+		return
+	}
+	processResults := func() {
+		for _, row := range result.Rows {
+			// [5be4b29396a72501206f561082f2f87f696bc9ef 29dbe15b5c802d2e32e9d02a76798815660005b8 2021-10-04T19:52:27.208Z RESOLVED]
+			// [16e6334b1385f7ff83dac3cd322dfd3ecfdc8f5e 77f6e01aaac4e573205fb8e8097b91b253f76067 2021-10-04T19:52:29.152Z UNCONFIRMED]
+			documentID, _ := row[0].(string)
+			identityID, _ := row[1].(string)
+			createdAt, _ := timeParseES(row[2].(string))
+			status, _ := row[3].(string)
+			item := datalakeIssueReportItem{
+				docID:       documentID,
+				identityID:  identityID,
+				dataSource:  ds,
+				projectSlug: projectSlug,
+				createdAt:   createdAt,
+				actionType:  "bugzilla:" + status,
+				filtered:    false,
+			}
+			issueItems = append(issueItems, item)
+		}
+	}
+	processResults()
+	for {
+		if result.Cursor == "" {
+			break
+		}
+		data = `{"cursor":"` + result.Cursor + `"}`
+		//fmt.Printf("data=%s\n", data)
+		payloadBytes = []byte(data)
+		payloadBody = bytes.NewReader(payloadBytes)
+		req, err = http.NewRequest(method, url, payloadBody)
+		fatalError(err)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err = http.DefaultClient.Do(req)
+		fatalError(err)
+		body, err = ioutil.ReadAll(resp.Body)
+		fatalError(err)
+		err = jsoniter.Unmarshal(body, &result)
+		fatalError(err)
+		if result.Error.Type != "" || result.Error.Reason != "" {
+			fmt.Printf("datalakeBugzillaIssueReportForRoot: error for %s: %v\n", pattern, result.Error)
+			break
+		}
+		if len(result.Rows) == 0 {
+			break
+		}
+		processResults()
+	}
+	if result.Cursor == "" {
+		return
+	}
+	url = gESURL + "/_sql/close"
+	data = `{"cursor":"` + result.Cursor + `"}`
+	payloadBytes = []byte(data)
+	payloadBody = bytes.NewReader(payloadBytes)
+	req, err = http.NewRequest(method, url, payloadBody)
+	fatalError(err)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err = http.DefaultClient.Do(req)
+	fatalError(err)
+	body, err = ioutil.ReadAll(resp.Body)
+	fatalError(err)
+	_ = resp.Body.Close()
+	return
+}
+
+// subrep
 func datalakeDocReportForRoot(root, projectSlug string, overrideProjectSlug bool) (docItems []datalakeDocReportItem) {
 	if gDbg {
 		defer func() {
 			fmt.Printf("got docs %s: %v\n", root, docItems)
 		}()
 	}
-	pattern := jsonEscape("sds-" + root + "-confluence,sds-" + root + "-confluence-*,-*-raw,-*-for-merge,-*-cache,-*-converted,-*-temp,-*-last-action-date-cache")
+	pattern := jsonEscape("sds-" + root + "-confluence*,-*-raw,-*-for-merge,-*-cache,-*-converted,-*-temp,-*-last-action-date-cache")
 	method := "POST"
 	data := fmt.Sprintf(
 		`{"query":"select uuid, author_id, project_slug, metadata__enriched_on, type from \"%s\" `+
@@ -970,8 +1217,17 @@ func datalakeDocReportForRoot(root, projectSlug string, overrideProjectSlug bool
 }
 
 // subrep
-func datalakeReportForRoot(ch chan datalakeReport, root string, dataSourceTypes []string, bLOC, bDocs, bPRs, bIssues bool) (itemData datalakeReport) {
+func datalakeReportForRoot(ch chan datalakeReport, msg, root string, dataSourceTypes []string, bLOC, bDocs, bPRs, bIssues bool) (itemData datalakeReport) {
 	defer func() {
+		gDtMtx.Lock()
+		defer gDtMtx.Unlock()
+		now := time.Now()
+		ago := now.Sub(gDt)
+		// fmt.Printf("%f %s\n", ago.Seconds(), root)
+		if ago.Seconds() > 10.0 {
+			fmt.Printf("%s current: %s\n", msg, root)
+			gDt = now
+		}
 		ch <- itemData
 	}()
 	daName, sfName, found := applySlugMapping(root)
@@ -993,17 +1249,18 @@ func datalakeReportForRoot(ch chan datalakeReport, root string, dataSourceTypes 
 	}
 	if bIssues {
 		itemData.issueItems = datalakeGithubIssueReportForRoot(root, daName, found)
-		// xxx
-		/*
-			issueItems := datalakeJiraIssueReportForRoot(root, daName, found)
-			if len(issueItems) > 0 {
-				itemData.issueItems = append(itemData.issueItems, issueItems...)
-			}
-			issueItems := datalakeBugzillaIssueReportForRoot(root, daName, found)
-			if len(issueItems) > 0 {
-				itemData.issueItems = append(itemData.issueItems, issueItems...)
-			}
-		*/
+		issueItems := datalakeJiraIssueReportForRoot(root, daName, found)
+		if len(issueItems) > 0 {
+			itemData.issueItems = append(itemData.issueItems, issueItems...)
+		}
+		issueItems = datalakeBugzillaIssueReportForRoot(root, daName, found, false)
+		if len(issueItems) > 0 {
+			itemData.issueItems = append(itemData.issueItems, issueItems...)
+		}
+		issueItems = datalakeBugzillaIssueReportForRoot(root, daName, found, true)
+		if len(issueItems) > 0 {
+			itemData.issueItems = append(itemData.issueItems, issueItems...)
+		}
 	}
 	return
 }
@@ -1559,16 +1816,6 @@ func saveDatalakeLOCReport(report []datalakeLOCReportItem) {
 }
 
 func toIssueType(inType string) string {
-	// xxx
-	/*
-			jira:
-		  comment
-		  issue
-			bugzilla:
-		  status
-			bugzillarest:
-		  status
-	*/
 	switch inType {
 	case "issue":
 		return "GitHub issue created"
@@ -1580,7 +1827,15 @@ func toIssueType(inType string) string {
 		return "GitHub issue comment reaction"
 	case "issue_reaction":
 		return "GitHub issue reaction"
+	case "jira_issue":
+		return "Jira issue created"
+	case "jira_comment":
+		return "Jira comment added"
 	default:
+		if strings.HasPrefix(inType, "bugzilla:") {
+			status := inType[9:]
+			return "Bugzilla issue " + strings.Replace(strings.ToLower(strings.TrimSpace(status)), "_", " ", -1)
+		}
 		return "?"
 	}
 }
@@ -1600,7 +1855,7 @@ func toPRType(inType string) string {
 	case "pull_request_review":
 		// should not happen - we're splitting this into separate approval states
 		return "GitHub PR review"
-	case "GitHub PR approved", "GitHub PR changes requested", "GitHub PR review comment", "PR merged", "Gerrit review rejected", "Gerrit review approved":
+	case "GitHub PR approved", "GitHub PR changes requested", "GitHub PR dismissed", "GitHub PR review comment", "PR merged", "Gerrit review rejected", "Gerrit review approved":
 		return inType
 	case "approval":
 		// should not happen - we're splitting this into separate approval states
@@ -1746,7 +2001,9 @@ func saveDatalakeDocsReport(report []datalakeDocReportItem) {
 func genOrgReport(roots, dataSourceTypes []string) {
 	thrN := runtime.NumCPU()
 	// thrN = 1
-	// roots = roots[:50]
+	// if len(roots) > 20 {
+	//	 roots = roots[:20]
+	// }
 	if thrN > 20 {
 		thrN = 20
 	}
@@ -1943,10 +2200,10 @@ func genDatalakeReport(roots, dataSourceTypes []string) {
 		fmt.Printf("Datalake report for projects %+v\n", roots)
 	}
 	thrN := runtime.NumCPU()
-	// xxx
 	// thrN = 1
-	roots = roots[:50]
-	// xxx
+	// if len(roots) > 20 {
+	//	 roots = roots[:20]
+	// }
 	if thrN > 20 {
 		thrN = 20
 	}
@@ -1986,9 +2243,11 @@ func genDatalakeReport(roots, dataSourceTypes []string) {
 			}
 		}
 	}
-	for _, root := range roots {
+	n := len(roots)
+	for i, root := range roots {
 		// subrep
-		go datalakeReportForRoot(ch, root, dataSourceTypes, bLOC, bDocs, bPRs, bIssues)
+		msg := fmt.Sprintf("%d/%d (%.1f%%)", i, n, (float64(i)*100.0)/float64(n))
+		go datalakeReportForRoot(ch, msg, root, dataSourceTypes, bLOC, bDocs, bPRs, bIssues)
 		nThreads++
 		if nThreads == thrN {
 			processData()
@@ -2074,6 +2333,7 @@ func setupEnvs() {
 		}
 	}
 	gAll = make(map[string]struct{})
+	gDt = time.Now()
 }
 
 func main() {
