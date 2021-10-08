@@ -66,6 +66,7 @@ type datalakeLOCReportItem struct {
 	createdAt   time.Time
 	locAdded    int
 	locDeleted  int
+	filtered    bool
 }
 
 // This is a data returned from a single datalake report for project
@@ -300,14 +301,136 @@ func applySlugMapping(slug string) (daName, sfName string, found bool) {
 	return
 }
 
-func datalakeReportForRoot(ch chan datalakeData, root string, dataSourceTypes []string) (data datalakeData) {
+func datalakeLOCReportForRoot(root, projectSlug string, overrideProjectSlug bool) (locItems []datalakeLOCReportItem) {
+	if gDbg {
+		defer func() {
+			fmt.Printf("got %s: %v\n", root, locItems)
+		}()
+	}
+	pattern := jsonEscape("sds-" + root + "-git,sds-" + root + "-git-*,-*-raw,-*-for-merge,-*-cache,-*-converted,-*-temp,-*-last-action-date-cache")
+	method := "POST"
+	data := fmt.Sprintf(
+		`{"query":"select uuid, author_id, project_slug, metadata__updated_on, lines_added, lines_removed from \"%s\" `+
+			`where author_id is not null and type = 'commit' and (lines_added > 0 or lines_removed > 0)","fetch_size":%d}`,
+		pattern,
+		10000,
+	)
+	payloadBytes := []byte(data)
+	payloadBody := bytes.NewReader(payloadBytes)
+	url := gESURL + "/_sql?format=json"
+	req, err := http.NewRequest(method, url, payloadBody)
+	fatalError(err)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	fatalError(err)
+	body, err := ioutil.ReadAll(resp.Body)
+	fatalError(err)
+	_ = resp.Body.Close()
+	type resultType struct {
+		Cursor string          `json:"cursor"`
+		Rows   [][]interface{} `json:"rows"`
+		Error  struct {
+			Type   string `json:"type"`
+			Reason string `json:"reason"`
+		} `json:"error"`
+	}
+	var result resultType
+	err = jsoniter.Unmarshal(body, &result)
+	fatalError(err)
+	if result.Error.Type != "" || result.Error.Reason != "" {
+		// Error in this case is allowed
+		if gDbg {
+			fmt.Printf("datalakeLOCReportForRoot: error for %s: %v\n", pattern, result.Error)
+		}
+		return
+	}
+	if len(result.Rows) == 0 {
+		return
+	}
+	var pSlug string
+	if overrideProjectSlug {
+		pSlug = projectSlug
+	}
+	processResults := func() {
+		for _, row := range result.Rows {
+			// [f16103509162d3044c5882a2b0d4c4cf70c16cb0 7f6daae75c73b05795d1cffb2f6642d51ad94ab5 accord/accord-concerto 2021-08-11T12:16:55.000Z 1 1]
+			documentID, _ := row[0].(string)
+			identityID, _ := row[1].(string)
+			if !overrideProjectSlug {
+				pSlug, _ = row[2].(string)
+			}
+			createdAt, _ := timeParseES(row[3].(string))
+			fLOCAdded, _ := row[4].(float64)
+			locAdded := int(fLOCAdded)
+			fLOCDeleted, _ := row[5].(float64)
+			locDeleted := int(fLOCDeleted)
+			item := datalakeLOCReportItem{
+				docID:       documentID,
+				identityID:  identityID,
+				dataSource:  "git",
+				projectSlug: pSlug,
+				createdAt:   createdAt,
+				locAdded:    locAdded,
+				locDeleted:  locDeleted,
+				filtered:    false,
+			}
+			locItems = append(locItems, item)
+		}
+	}
+	processResults()
+	for {
+		if result.Cursor == "" {
+			break
+		}
+		data = `{"cursor":"` + result.Cursor + `"}`
+		//fmt.Printf("data=%s\n", data)
+		payloadBytes = []byte(data)
+		payloadBody = bytes.NewReader(payloadBytes)
+		req, err = http.NewRequest(method, url, payloadBody)
+		fatalError(err)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err = http.DefaultClient.Do(req)
+		fatalError(err)
+		body, err = ioutil.ReadAll(resp.Body)
+		fatalError(err)
+		err = jsoniter.Unmarshal(body, &result)
+		fatalError(err)
+		if result.Error.Type != "" || result.Error.Reason != "" {
+			fmt.Printf("datalakeLOCReportForRoot: error for %s: %v\n", pattern, result.Error)
+			break
+		}
+		if len(result.Rows) == 0 {
+			break
+		}
+		processResults()
+	}
+	if result.Cursor == "" {
+		return
+	}
+	url = gESURL + "/_sql/close"
+	data = `{"cursor":"` + result.Cursor + `"}`
+	payloadBytes = []byte(data)
+	payloadBody = bytes.NewReader(payloadBytes)
+	req, err = http.NewRequest(method, url, payloadBody)
+	fatalError(err)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err = http.DefaultClient.Do(req)
+	fatalError(err)
+	body, err = ioutil.ReadAll(resp.Body)
+	fatalError(err)
+	_ = resp.Body.Close()
+	return
+}
+
+func datalakeReportForRoot(ch chan datalakeData, root string, dataSourceTypes []string) (itemData datalakeData) {
 	defer func() {
-		ch <- data
+		ch <- itemData
 	}()
 	daName, sfName, found := applySlugMapping(root)
 	if gDbg {
 		fmt.Printf("running for: %s %v -> %s,%s,%v\n", root, dataSourceTypes, daName, sfName, found)
 	}
+	itemData.locItems = datalakeLOCReportForRoot(root, daName, found)
 	return
 }
 
@@ -862,8 +985,8 @@ func genDatalakeReport(roots, dataSourceTypes []string) {
 	}
 	thrN := runtime.NumCPU()
 	// xxx
-	// thrN = 1
-	// roots = roots[:3]
+	thrN = 1
+	roots = roots[:10]
 	// xxx
 	runtime.GOMAXPROCS(thrN)
 	ch := make(chan datalakeData)
@@ -886,6 +1009,7 @@ func genDatalakeReport(roots, dataSourceTypes []string) {
 	for nThreads > 0 {
 		processData()
 	}
+	// xxx
 	fmt.Printf("%+v\n", report)
 }
 
