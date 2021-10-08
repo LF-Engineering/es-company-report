@@ -268,6 +268,10 @@ func toMDYDate(dt time.Time) string {
 	return fmt.Sprintf("%d/%d/%d", dt.Month(), dt.Day(), dt.Year())
 }
 
+func toYMDHMSDate(dt time.Time) string {
+	return fmt.Sprintf("%04d-%02d-%02d %02d:%02d:%02d", dt.Year(), dt.Month(), dt.Day(), dt.Hour(), dt.Minute(), dt.Second())
+}
+
 func applySlugMapping(slug string) (daName, sfName string, found bool) {
 	slugs := []string{slug}
 	if gDbg {
@@ -731,7 +735,7 @@ func enrichOtherMetrics(ch chan struct{}, mtx *sync.RWMutex, report *contribRepo
 	}
 }
 
-func enrichReport(report *contribReport) {
+func enrichOrgReport(report *contribReport) {
 	mtx := &sync.RWMutex{}
 	shCh := make(chan struct{})
 	go func(ch chan struct{}) {
@@ -824,7 +828,7 @@ func enrichReport(report *contribReport) {
 	<-shCh
 }
 
-func summaryReport(report *contribReport) {
+func summaryOrgReport(report *contribReport) {
 	// Summary is for all projects combined
 	// name,email,project,sub_project,contributions,commits,loc_added,loc_deleted,pr_activity,issue_activity,from,to,uuid -> name,email,contributions,commits,loc_added,loc_deleted,pr_activity,issue_activity,from,to,uuid
 	report.summary = make(map[string]contribReportItem)
@@ -854,7 +858,7 @@ func summaryReport(report *contribReport) {
 	}
 }
 
-func saveReport(report []contribReportItem) {
+func saveOrgReport(report []contribReportItem) {
 	rows := [][]string{}
 	for _, item := range report {
 		row := []string{
@@ -901,7 +905,7 @@ func saveReport(report []contribReportItem) {
 	}
 }
 
-func saveSummaryReport(report map[string]contribReportItem) {
+func saveSummaryOrgReport(report map[string]contribReportItem) {
 	rows := [][]string{}
 	for _, item := range report {
 		row := []string{
@@ -946,6 +950,43 @@ func saveSummaryReport(report map[string]contribReportItem) {
 	}
 }
 
+func saveDatalakeLOCReport(report []datalakeLOCReportItem) {
+	rows := [][]string{}
+	for _, item := range report {
+		filtered := "0"
+		if item.filtered {
+			filtered = "1"
+		}
+		row := []string{
+			item.docID,
+			item.identityID,
+			item.dataSource,
+			item.projectSlug,
+			toYMDHMSDate(item.createdAt),
+			strconv.Itoa(item.locAdded),
+			strconv.Itoa(item.locDeleted),
+			filtered,
+		}
+		rows = append(rows, row)
+	}
+	sort.Slice(
+		rows,
+		func(i, j int) bool {
+			return rows[i][4] > rows[j][4]
+		},
+	)
+	var writer *csv.Writer
+	file, err := os.Create("datalake_loc.csv")
+	fatalError(err)
+	defer func() { _ = file.Close() }()
+	writer = csv.NewWriter(file)
+	defer writer.Flush()
+	fatalError(writer.Write([]string{"ES Document Id", "Identity Id", "Datasource", "Insights project slug", "CreatedAt", "LOC Added", "LOC Deleted", "Filtered"}))
+	for _, row := range rows {
+		fatalError(writer.Write(row))
+	}
+}
+
 func genOrgReport(roots, dataSourceTypes []string) {
 	thrN := runtime.NumCPU()
 	// thrN = 1
@@ -972,10 +1013,67 @@ func genOrgReport(roots, dataSourceTypes []string) {
 			report.items = append(report.items, item)
 		}
 	}
-	enrichReport(&report)
-	summaryReport(&report)
-	saveReport(report.items)
-	saveSummaryReport(report.summary)
+	enrichOrgReport(&report)
+	summaryOrgReport(&report)
+	saveOrgReport(report.items)
+	saveSummaryOrgReport(report.summary)
+}
+
+func dedupDatalakeReport(report *datalakeReport) {
+	locDocIDs := map[string]struct{}{}
+	locItems := []datalakeLOCReportItem{}
+	for _, locItem := range report.locItems {
+		_, ok := locDocIDs[locItem.docID]
+		if !ok {
+			locItems = append(locItems, locItem)
+			locDocIDs[locItem.docID] = struct{}{}
+		}
+	}
+	if len(locItems) != len(report.locItems) {
+		fmt.Printf("LOC data dedup: %d -> %d\n", len(report.locItems), len(locItems))
+		report.locItems = locItems
+	} else {
+		fmt.Printf("no duplicate elements found, LOC items: %d\n", len(report.locItems))
+	}
+}
+
+func filterDatalakeReport(report *datalakeReport, identityIDs map[string]struct{}) {
+	locFiltered := 0
+	for i, locItem := range report.locItems {
+		_, ok := identityIDs[locItem.identityID]
+		if !ok {
+			report.locItems[i].filtered = true
+			locFiltered++
+		}
+	}
+	if locFiltered > 0 {
+		fmt.Printf("filtered %d/%d loc items\n", locFiltered, len(report.locItems))
+	} else {
+		fmt.Printf("all %d LOC items also present in SH DB loc items\n", len(report.locItems))
+	}
+}
+
+func getAffiliatedNonBotIdentities(ch chan map[string]struct{}) {
+	identityIDs := map[string]struct{}{}
+	defer func() {
+		ch <- identityIDs
+	}()
+	// Identity must be present in SH DB
+	// It must have at least one enrollment (not matter individual, company) also enrollment dates doesn't matter
+	// Identity's profile must not be bot
+	query := "select distinct i.id from identities i " +
+		"where i.uuid in (select uuid from enrollments) " +
+		"and i.uuid not in (select uuid from profiles where is_bot is true)"
+	rows, err := gDB.Query(query)
+	fatalError(err)
+	var id string
+	for rows.Next() {
+		err = rows.Scan(&id)
+		fatalError(err)
+		identityIDs[id] = struct{}{}
+	}
+	fatalError(rows.Err())
+	fatalError(rows.Close())
 }
 
 func genDatalakeReport(roots, dataSourceTypes []string) {
@@ -985,10 +1083,12 @@ func genDatalakeReport(roots, dataSourceTypes []string) {
 	}
 	thrN := runtime.NumCPU()
 	// xxx
-	thrN = 1
-	roots = roots[:10]
+	// thrN = 1
+	// roots = roots[:10]
 	// xxx
 	runtime.GOMAXPROCS(thrN)
+	chIdentIDs := make(chan map[string]struct{})
+	go getAffiliatedNonBotIdentities(chIdentIDs)
 	ch := make(chan datalakeData)
 	report := datalakeReport{}
 	nThreads := 0
@@ -1009,8 +1109,11 @@ func genDatalakeReport(roots, dataSourceTypes []string) {
 	for nThreads > 0 {
 		processData()
 	}
-	// xxx
-	fmt.Printf("%+v\n", report)
+	dedupDatalakeReport(&report)
+	identityIDs := <-chIdentIDs
+	fmt.Printf("%d non-bot identities having at least one enrollment present in SH DB\n", len(identityIDs))
+	filterDatalakeReport(&report, identityIDs)
+	saveDatalakeLOCReport(report.locItems)
 }
 
 func setupSHDB() {
