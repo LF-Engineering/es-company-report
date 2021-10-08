@@ -50,9 +50,32 @@ type contribReportItem struct {
 	prAct      int
 	issueAct   int
 }
+
+// contribReport - full report structure
 type contribReport struct {
 	items   []contribReportItem
 	summary map[string]contribReportItem
+}
+
+// LOC stats report item (only git)
+type datalakeLOCReportItem struct {
+	docID       string
+	identityID  string
+	dataSource  string
+	projectSlug string
+	createdAt   time.Time
+	locAdded    int
+	locDeleted  int
+}
+
+// This is a data returned from a single datalake report for project
+type datalakeData struct {
+	locItems []datalakeLOCReportItem
+}
+
+// datalakeReport - full report structure
+type datalakeReport struct {
+	locItems []datalakeLOCReportItem
 }
 
 func fatalError(err error) {
@@ -244,15 +267,13 @@ func toMDYDate(dt time.Time) string {
 	return fmt.Sprintf("%d/%d/%d", dt.Month(), dt.Day(), dt.Year())
 }
 
-func applySlugMapping(slug string) (sfName string) {
+func applySlugMapping(slug string) (daName, sfName string, found bool) {
 	slugs := []string{slug}
-	/*
+	if gDbg {
 		defer func() {
-			if sfName != slug {
-				fmt.Printf("slug mapping: %s -> %+v -> %s\n", slug, slugs, sfName)
-			}
+			fmt.Printf("slug mapping: %s -> %+v -> %s,%s,%v\n", slug, slugs, daName, sfName, found)
 		}()
-	*/
+	}
 	ary := strings.Split(slug, "-")
 	n := len(ary)
 	for i := 1; i < n; i++ {
@@ -269,18 +290,32 @@ func applySlugMapping(slug string) (sfName string) {
 		fatalError(rows.Err())
 		fatalError(rows.Close())
 		if sfName != "" {
+			daName = slg
+			found = true
 			return
 		}
 	}
 	sfName = slug
+	daName = slug
 	return
 }
 
-func reportForRoot(ch chan []contribReportItem, root string) (items []contribReportItem) {
+func datalakeReportForRoot(ch chan datalakeData, root string, dataSourceTypes []string) (data datalakeData) {
+	defer func() {
+		ch <- data
+	}()
+	daName, sfName, found := applySlugMapping(root)
+	if gDbg {
+		fmt.Printf("running for: %s %v -> %s,%s,%v\n", root, dataSourceTypes, daName, sfName, found)
+	}
+	return
+}
+
+func orgReportForRoot(ch chan []contribReportItem, root string) (items []contribReportItem) {
 	defer func() {
 		ch <- items
 	}()
-	sfName := applySlugMapping(root)
+	_, sfName, _ := applySlugMapping(root)
 	// fmt.Printf("running for: %s -> %s\n", root, sfName)
 	pattern := jsonEscape("sds-" + root + "-*,-*-raw,-*-for-merge,-*-cache,-*-converted,-*-temp,-*-last-action-date-cache")
 	method := "POST"
@@ -797,7 +832,7 @@ func genOrgReport(roots, dataSourceTypes []string) {
 	report := contribReport{}
 	nThreads := 0
 	for _, root := range roots {
-		go reportForRoot(ch, root)
+		go orgReportForRoot(ch, root)
 		nThreads++
 		if nThreads == thrN {
 			items := <-ch
@@ -821,8 +856,37 @@ func genOrgReport(roots, dataSourceTypes []string) {
 }
 
 func genDatalakeReport(roots, dataSourceTypes []string) {
-	fmt.Printf("Datalake report for data source types %+v\n", dataSourceTypes)
-	fmt.Printf("Datalake report for projects %+v\n", roots)
+	if gDbg {
+		fmt.Printf("Datalake report for data source types %+v\n", dataSourceTypes)
+		fmt.Printf("Datalake report for projects %+v\n", roots)
+	}
+	thrN := runtime.NumCPU()
+	// xxx
+	// thrN = 1
+	// roots = roots[:3]
+	// xxx
+	runtime.GOMAXPROCS(thrN)
+	ch := make(chan datalakeData)
+	report := datalakeReport{}
+	nThreads := 0
+	processData := func() {
+		data := <-ch
+		nThreads--
+		for _, item := range data.locItems {
+			report.locItems = append(report.locItems, item)
+		}
+	}
+	for _, root := range roots {
+		go datalakeReportForRoot(ch, root, dataSourceTypes)
+		nThreads++
+		if nThreads == thrN {
+			processData()
+		}
+	}
+	for nThreads > 0 {
+		processData()
+	}
+	fmt.Printf("%+v\n", report)
 }
 
 func setupSHDB() {
