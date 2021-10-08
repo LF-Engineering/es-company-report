@@ -71,7 +71,7 @@ type datalakeLOCReportItem struct {
 	filtered    bool
 }
 
-// Docs stats report item (only git)
+// Docs stats report item (only confluence)
 // subrep
 type datalakeDocReportItem struct {
 	docID       string
@@ -79,15 +79,41 @@ type datalakeDocReportItem struct {
 	dataSource  string
 	projectSlug string
 	createdAt   time.Time
-	actionType  string
+	actionType  string // page, new_page, comment, attachment
+	filtered    bool
+}
+
+// PRs stats report item (github pull_request & gerrit)
+// subrep
+type datalakePRReportItem struct {
+	docID       string
+	identityID  string
+	dataSource  string
+	projectSlug string
+	createdAt   time.Time
+	actionType  string // all possible doc types from github-issue (PRs only) and gerrit
+	filtered    bool
+}
+
+// Issues stats report item (github issue, Jira issue, Bugzilla(rest) issue)
+// subrep
+type datalakeIssueReportItem struct {
+	docID       string
+	identityID  string
+	dataSource  string
+	projectSlug string
+	createdAt   time.Time
+	actionType  string // all possible doc types from github-issue (Issue only), Jira & Bugzilla(rest)
 	filtered    bool
 }
 
 // datalakeReport - full report structure
 // subrep
 type datalakeReport struct {
-	locItems []datalakeLOCReportItem
-	docItems []datalakeDocReportItem
+	locItems   []datalakeLOCReportItem
+	docItems   []datalakeDocReportItem
+	prItems    []datalakePRReportItem
+	issueItems []datalakeIssueReportItem
 }
 
 func fatalError(err error) {
@@ -439,6 +465,142 @@ func datalakeLOCReportForRoot(root, projectSlug string, overrideProjectSlug bool
 }
 
 // subrep
+func datalakeGithubPRReportForRoot(root, projectSlug string, overrideProjectSlug bool) (prItems []datalakePRReportItem) {
+	if gDbg {
+		defer func() {
+			fmt.Printf("got github-pr %s: %v\n", root, prItems)
+		}()
+	}
+	pattern := jsonEscape("sds-" + root + "-github-issue,sds-" + root + "-github-issue-*,-*-raw,-*-for-merge,-*-cache,-*-converted,-*-temp,-*-last-action-date-cache")
+	method := "POST"
+	data := fmt.Sprintf(
+		`{"query":"select uuid, author_id, project_slug, metadata__enriched_on, type, state, merged_by_data_id from \"%s\" `+
+			`where author_id is not null and is_github_pull_request = 1","fetch_size":%d}`,
+		pattern,
+		10000,
+	)
+	payloadBytes := []byte(data)
+	payloadBody := bytes.NewReader(payloadBytes)
+	url := gESURL + "/_sql?format=json"
+	req, err := http.NewRequest(method, url, payloadBody)
+	fatalError(err)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	fatalError(err)
+	body, err := ioutil.ReadAll(resp.Body)
+	fatalError(err)
+	_ = resp.Body.Close()
+	type resultType struct {
+		Cursor string          `json:"cursor"`
+		Rows   [][]interface{} `json:"rows"`
+		Error  struct {
+			Type   string `json:"type"`
+			Reason string `json:"reason"`
+		} `json:"error"`
+	}
+	var result resultType
+	err = jsoniter.Unmarshal(body, &result)
+	fatalError(err)
+	if result.Error.Type != "" || result.Error.Reason != "" {
+		// Error in this case is allowed
+		if gDbg {
+			fmt.Printf("datalakePRReportForRoot: error for %s: %v\n", pattern, result.Error)
+		}
+		return
+	}
+	if len(result.Rows) == 0 {
+		return
+	}
+	var pSlug string
+	if overrideProjectSlug {
+		pSlug = projectSlug
+	}
+	processResults := func() {
+		for _, row := range result.Rows {
+			// [ffd3f84758dbdd21df9a66b09a96df1ae47db0f3 2ca78b1cc8c9bb81152d3495a5aa8058fba5801c academy-software-foundation/opencolorio 2021-09-16T06:33:13.461Z pull_request closed 5675ad72e0958195400713bc2430e77315cbedf9]
+			// [ffd3f84758dbdd21df9a66b09a96df1ae47db0f3 5675ad72e0958195400713bc2430e77315cbedf9 academy-software-foundation/opencolorio 2021-09-16T06:33:13.461Z pull_request_review APPROVED <nil>]
+			// [293c9ccfe121c0b895c9b7cf0ce20aa11f142aca 2ab3287aa9894fbb6b395e544fc579ba3126c8c7 academy-software-foundation/opencolorio 2021-10-04T23:32:45.981Z issue_comment <nil> <nil>]
+			documentID, _ := row[0].(string)
+			identityID, _ := row[1].(string)
+			if !overrideProjectSlug {
+				pSlug, _ = row[2].(string)
+			}
+			createdAt, _ := timeParseES(row[3].(string))
+			actionType, _ := row[4].(string)
+			state, _ := row[5].(string)
+			mergeIdentityID, _ := row[6].(string)
+			// fmt.Printf("(%s,%s,%s)\n", actionType, state, mergeIdentityID)
+			if actionType == "pull_request_review" {
+				switch state {
+				case "APPROVED":
+					actionType = "PR approved"
+				case "CHANGES_REQUESTED":
+					actionType = "PR changes requested"
+				case "COMMENTED":
+					actionType = "PR review comment"
+				}
+			}
+			if identityID == mergeIdentityID {
+				actionType = "PR merged"
+			}
+			item := datalakePRReportItem{
+				docID:       documentID,
+				identityID:  identityID,
+				dataSource:  "git",
+				projectSlug: pSlug,
+				createdAt:   createdAt,
+				actionType:  actionType,
+				filtered:    false,
+			}
+			prItems = append(prItems, item)
+		}
+	}
+	processResults()
+	for {
+		if result.Cursor == "" {
+			break
+		}
+		data = `{"cursor":"` + result.Cursor + `"}`
+		//fmt.Printf("data=%s\n", data)
+		payloadBytes = []byte(data)
+		payloadBody = bytes.NewReader(payloadBytes)
+		req, err = http.NewRequest(method, url, payloadBody)
+		fatalError(err)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err = http.DefaultClient.Do(req)
+		fatalError(err)
+		body, err = ioutil.ReadAll(resp.Body)
+		fatalError(err)
+		err = jsoniter.Unmarshal(body, &result)
+		fatalError(err)
+		if result.Error.Type != "" || result.Error.Reason != "" {
+			fmt.Printf("datalakePRReportForRoot: error for %s: %v\n", pattern, result.Error)
+			break
+		}
+		if len(result.Rows) == 0 {
+			break
+		}
+		processResults()
+	}
+	if result.Cursor == "" {
+		return
+	}
+	url = gESURL + "/_sql/close"
+	data = `{"cursor":"` + result.Cursor + `"}`
+	payloadBytes = []byte(data)
+	payloadBody = bytes.NewReader(payloadBytes)
+	req, err = http.NewRequest(method, url, payloadBody)
+	fatalError(err)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err = http.DefaultClient.Do(req)
+	fatalError(err)
+	body, err = ioutil.ReadAll(resp.Body)
+	fatalError(err)
+	_ = resp.Body.Close()
+	return
+}
+
+// subrep
 func datalakeDocReportForRoot(root, projectSlug string, overrideProjectSlug bool) (docItems []datalakeDocReportItem) {
 	if gDbg {
 		defer func() {
@@ -491,7 +653,7 @@ func datalakeDocReportForRoot(root, projectSlug string, overrideProjectSlug bool
 	}
 	processResults := func() {
 		for _, row := range result.Rows {
-      // [cff117ac4b479e31473727cd775f7e96746e7e7e 9e7702dd25aac483d9104b4ba93fa1b73c751083 academy-software-foundation/academy-software-foundation-common 2021-10-01T05:14:53.931Z page]
+			// [cff117ac4b479e31473727cd775f7e96746e7e7e 9e7702dd25aac483d9104b4ba93fa1b73c751083 academy-software-foundation/academy-software-foundation-common 2021-10-01T05:14:53.931Z page]
 			documentID, _ := row[0].(string)
 			identityID, _ := row[1].(string)
 			if !overrideProjectSlug {
@@ -557,7 +719,7 @@ func datalakeDocReportForRoot(root, projectSlug string, overrideProjectSlug bool
 }
 
 // subrep
-func datalakeReportForRoot(ch chan datalakeReport, root string, dataSourceTypes []string, bLOC, bDocs bool) (itemData datalakeReport) {
+func datalakeReportForRoot(ch chan datalakeReport, root string, dataSourceTypes []string, bLOC, bDocs, bPRs, bIssues bool) (itemData datalakeReport) {
 	defer func() {
 		ch <- itemData
 	}()
@@ -571,6 +733,22 @@ func datalakeReportForRoot(ch chan datalakeReport, root string, dataSourceTypes 
 	if bDocs {
 		itemData.docItems = datalakeDocReportForRoot(root, daName, found)
 	}
+	if bPRs {
+		itemData.prItems = datalakeGithubPRReportForRoot(root, daName, found)
+		// xxx
+		/*
+		   prItems := datalakeGerritReviewReportForRoot(root, daName, found)
+		   if len(prItems) > 0 {
+		     itemData.prItems = append(itemData.prItems, prItems...)
+		   }
+		*/
+	}
+	// xxx
+	/*
+		if bIssues {
+			itemData.issueItems = datalakeIssueReportForRoot(root, daName, found)
+		}
+	*/
 	return
 }
 
@@ -1123,6 +1301,130 @@ func saveDatalakeLOCReport(report []datalakeLOCReportItem) {
 	}
 }
 
+func toIssueType(inType string) string {
+	// xxx
+	/*
+				  github-issue:
+				  jira:
+		      bugzilla:
+		      bugzillarest:
+	*/
+	switch inType {
+	case "attachment":
+		return "Attachment added"
+	case "comment":
+		return "Commented"
+	case "new_page":
+		return "Page created"
+	case "page":
+		return "Page edited"
+	default:
+		return "?"
+	}
+}
+
+func toPRType(inType string) string {
+	// xxx
+	/*
+	  gerrit:
+	  approval
+	  changeset
+	  comment
+	  patchset
+	*/
+	switch inType {
+	case "pull_request":
+		return "PR submitted"
+	case "pull_request_assignee":
+		return "PR assignment"
+	case "pull_request_comment":
+		return "PR comment"
+	case "pull_request_comment_reaction":
+		return "PR reaction"
+	case "pull_request_requested_reviewer":
+		return "PR requested reviewer assignment"
+	case "pull_request_review":
+		return "PR review"
+	case "PR approved", "PR changes requested", "PR review comment", "PR merged":
+		return inType
+	default:
+		fmt.Printf("unknown PR action type: %s\n", inType)
+		return "?"
+	}
+}
+
+func saveDatalakePRsReport(report []datalakePRReportItem) {
+	rows := [][]string{}
+	for _, item := range report {
+		filtered := "0"
+		if item.filtered {
+			filtered = "1"
+		}
+		row := []string{
+			item.docID,
+			item.identityID,
+			item.dataSource,
+			item.projectSlug,
+			toYMDHMSDate(item.createdAt),
+			toPRType(item.actionType),
+			filtered,
+		}
+		rows = append(rows, row)
+	}
+	sort.Slice(
+		rows,
+		func(i, j int) bool {
+			return rows[i][4] > rows[j][4]
+		},
+	)
+	var writer *csv.Writer
+	file, err := os.Create("datalake_prs.csv")
+	fatalError(err)
+	defer func() { _ = file.Close() }()
+	writer = csv.NewWriter(file)
+	defer writer.Flush()
+	fatalError(writer.Write([]string{"ES Document Id", "Identity Id", "Datasource", "Insights Project Slug", "Created At", "Type", "Filtered"}))
+	for _, row := range rows {
+		fatalError(writer.Write(row))
+	}
+}
+
+func saveDatalakeIssuesReport(report []datalakeIssueReportItem) {
+	rows := [][]string{}
+	for _, item := range report {
+		filtered := "0"
+		if item.filtered {
+			filtered = "1"
+		}
+		row := []string{
+			item.docID,
+			item.identityID,
+			item.dataSource,
+			item.projectSlug,
+			toYMDHMSDate(item.createdAt),
+			toIssueType(item.actionType),
+			filtered,
+		}
+		rows = append(rows, row)
+	}
+	sort.Slice(
+		rows,
+		func(i, j int) bool {
+			return rows[i][4] > rows[j][4]
+		},
+	)
+	var writer *csv.Writer
+	file, err := os.Create("datalake_issues.csv")
+	fatalError(err)
+	defer func() { _ = file.Close() }()
+	writer = csv.NewWriter(file)
+	defer writer.Flush()
+	fatalError(writer.Write([]string{"ES Document Id", "Identity Id", "Datasource", "Insights Project Slug", "Created At", "Type", "Filtered"}))
+	for _, row := range rows {
+		fatalError(writer.Write(row))
+	}
+}
+
 func toDocType(inType string) string {
 	switch inType {
 	case "attachment":
@@ -1207,7 +1509,7 @@ func genOrgReport(roots, dataSourceTypes []string) {
 }
 
 // subrep
-func dedupDatalakeReport(report *datalakeReport, bLOC, bDocs bool) {
+func dedupDatalakeReport(report *datalakeReport, bLOC, bDocs, bPRs, bIssues bool) {
 	if bLOC {
 		locDocIDs := map[string]struct{}{}
 		locItems := []datalakeLOCReportItem{}
@@ -1242,10 +1544,44 @@ func dedupDatalakeReport(report *datalakeReport, bLOC, bDocs bool) {
 			fmt.Printf("no duplicate elements found, docs items: %d\n", len(report.docItems))
 		}
 	}
+	if bPRs {
+		prDocIDs := map[string]struct{}{}
+		prItems := []datalakePRReportItem{}
+		for _, prItem := range report.prItems {
+			_, ok := prDocIDs[prItem.docID]
+			if !ok {
+				prItems = append(prItems, prItem)
+				prDocIDs[prItem.docID] = struct{}{}
+			}
+		}
+		if len(prItems) != len(report.prItems) {
+			fmt.Printf("PR data dedup: %d -> %d\n", len(report.prItems), len(prItems))
+			report.prItems = prItems
+		} else {
+			fmt.Printf("no duplicate elements found, PR items: %d\n", len(report.prItems))
+		}
+	}
+	if bIssues {
+		issueDocIDs := map[string]struct{}{}
+		issueItems := []datalakeIssueReportItem{}
+		for _, issueItem := range report.issueItems {
+			_, ok := issueDocIDs[issueItem.docID]
+			if !ok {
+				issueItems = append(issueItems, issueItem)
+				issueDocIDs[issueItem.docID] = struct{}{}
+			}
+		}
+		if len(issueItems) != len(report.issueItems) {
+			fmt.Printf("Issue data dedup: %d -> %d\n", len(report.issueItems), len(issueItems))
+			report.issueItems = issueItems
+		} else {
+			fmt.Printf("no duplicate elements found, issue items: %d\n", len(report.issueItems))
+		}
+	}
 }
 
 // subrep
-func filterDatalakeReport(report *datalakeReport, identityIDs map[string]struct{}, bLOC, bDocs bool) {
+func filterDatalakeReport(report *datalakeReport, identityIDs map[string]struct{}, bLOC, bDocs, bPRs, bIssues bool) {
 	if bLOC {
 		locFiltered := 0
 		for i, locItem := range report.locItems {
@@ -1274,6 +1610,36 @@ func filterDatalakeReport(report *datalakeReport, identityIDs map[string]struct{
 			fmt.Printf("filtered %d/%d docs items\n", docFiltered, len(report.docItems))
 		} else {
 			fmt.Printf("all %d docs items also present in SH DB doc items\n", len(report.docItems))
+		}
+	}
+	if bPRs {
+		prFiltered := 0
+		for i, prItem := range report.prItems {
+			_, ok := identityIDs[prItem.identityID]
+			if !ok {
+				report.prItems[i].filtered = true
+				prFiltered++
+			}
+		}
+		if prFiltered > 0 {
+			fmt.Printf("filtered %d/%d PR items\n", prFiltered, len(report.prItems))
+		} else {
+			fmt.Printf("all %d PRs items also present in SH DB PR items\n", len(report.prItems))
+		}
+	}
+	if bIssues {
+		issueFiltered := 0
+		for i, issueItem := range report.issueItems {
+			_, ok := identityIDs[issueItem.identityID]
+			if !ok {
+				report.issueItems[i].filtered = true
+				issueFiltered++
+			}
+		}
+		if issueFiltered > 0 {
+			fmt.Printf("filtered %d/%d issue items\n", issueFiltered, len(report.issueItems))
+		} else {
+			fmt.Printf("all %d issues items also present in SH DB issue items\n", len(report.issueItems))
 		}
 	}
 }
@@ -1320,9 +1686,12 @@ func genDatalakeReport(roots, dataSourceTypes []string) {
 	// subrep
 	_, bLOC := gSubReport["loc"]
 	_, bDocs := gSubReport["docs"]
+	_, bPRs := gSubReport["prs"]
+	_, bIssues := gSubReport["issues"]
 	processData := func() {
 		data := <-ch
 		nThreads--
+		// subrep
 		if bLOC {
 			for _, item := range data.locItems {
 				report.locItems = append(report.locItems, item)
@@ -1333,10 +1702,20 @@ func genDatalakeReport(roots, dataSourceTypes []string) {
 				report.docItems = append(report.docItems, item)
 			}
 		}
+		if bPRs {
+			for _, item := range data.prItems {
+				report.prItems = append(report.prItems, item)
+			}
+		}
+		if bIssues {
+			for _, item := range data.issueItems {
+				report.issueItems = append(report.issueItems, item)
+			}
+		}
 	}
 	for _, root := range roots {
 		// subrep
-		go datalakeReportForRoot(ch, root, dataSourceTypes, bLOC, bDocs)
+		go datalakeReportForRoot(ch, root, dataSourceTypes, bLOC, bDocs, bPRs, bIssues)
 		nThreads++
 		if nThreads == thrN {
 			processData()
@@ -1346,15 +1725,21 @@ func genDatalakeReport(roots, dataSourceTypes []string) {
 		processData()
 	}
 	// subrep
-	dedupDatalakeReport(&report, bLOC, bDocs)
+	dedupDatalakeReport(&report, bLOC, bDocs, bPRs, bIssues)
 	identityIDs := <-chIdentIDs
 	fmt.Printf("%d non-bot identities having at least one enrollment present in SH DB\n", len(identityIDs))
-	filterDatalakeReport(&report, identityIDs, bLOC, bDocs)
+	filterDatalakeReport(&report, identityIDs, bLOC, bDocs, bPRs, bIssues)
 	if bLOC {
 		saveDatalakeLOCReport(report.locItems)
 	}
 	if bDocs {
 		saveDatalakeDocsReport(report.docItems)
+	}
+	if bPRs {
+		saveDatalakePRsReport(report.prItems)
+	}
+	if bIssues {
+		saveDatalakeIssuesReport(report.issueItems)
 	}
 }
 
