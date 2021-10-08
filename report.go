@@ -22,13 +22,14 @@ import (
 )
 
 var (
-	gESURL string
-	gDB    *sqlx.DB
-	gOrg   string
-	gFrom  string
-	gTo    string
-	gDbg   bool
-	gAll   map[string]struct{}
+	gReport string
+	gESURL  string
+	gDB     *sqlx.DB
+	gOrg    string
+	gFrom   string
+	gTo     string
+	gDbg    bool
+	gAll    map[string]struct{}
 )
 
 // contributor name, email address, project slug and affiliation date range
@@ -785,22 +786,31 @@ func setupSHDB() {
 
 func setupEnvs() {
 	gDbg = os.Getenv("DBG") != ""
+	gReport = os.Getenv("REPORT")
+	if gReport == "" {
+		fatal("REPORT must be set")
+	}
 	gESURL = os.Getenv("ES_URL")
 	if gESURL == "" {
 		fatal("ES_URL must be set")
 	}
-	gOrg = os.Getenv("ORG")
-	if gOrg == "" {
-		fatal("ORG must be set")
-	}
-	gOrg = jsonEscape(gOrg)
-	gFrom = jsonEscape(os.Getenv("FROM"))
-	gTo = jsonEscape(os.Getenv("TO"))
-	if gFrom == "" {
-		gFrom = "1900-01-01T00:00:00"
-	}
-	if gTo == "" {
-		gTo = "2100-01-01T00:00:00"
+	switch gReport {
+	case "org":
+		gOrg = os.Getenv("ORG")
+		if gOrg == "" {
+			fatal("ORG must be set")
+		}
+		gOrg = jsonEscape(gOrg)
+		gFrom = jsonEscape(os.Getenv("FROM"))
+		gTo = jsonEscape(os.Getenv("TO"))
+		if gFrom == "" {
+			gFrom = "1900-01-01T00:00:00"
+		}
+		if gTo == "" {
+			gTo = "2100-01-01T00:00:00"
+		}
+	default:
+		fatal("unknown report type: " + gReport)
 	}
 	gAll = make(map[string]struct{})
 }
@@ -808,5 +818,8 @@ func setupEnvs() {
 func main() {
 	setupEnvs()
 	setupSHDB()
-	genReport(getSlugRoots())
+	switch gReport {
+	case "org":
+		genReport(getSlugRoots())
+	}
 }
