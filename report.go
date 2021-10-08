@@ -361,7 +361,7 @@ func datalakeLOCReportForRoot(root, projectSlug string, overrideProjectSlug bool
 	pattern := jsonEscape("sds-" + root + "-git*,-*-github,-*-github-issue,-*-raw,-*-for-merge,-*-cache,-*-converted,-*-temp,-*-last-action-date-cache")
 	method := "POST"
 	data := fmt.Sprintf(
-		`{"query":"select uuid, author_id, project_slug, metadata__enriched_on, lines_added, lines_removed from \"%s\" `+
+		`{"query":"select git_uuid, author_id, project_slug, metadata__enriched_on, lines_added, lines_removed from \"%s\" `+
 			`where author_id is not null and type = 'commit' and (lines_added > 0 or lines_removed > 0)","fetch_size":%d}`,
 		pattern,
 		10000,
@@ -483,7 +483,7 @@ func datalakeGithubPRReportForRoot(root, projectSlug string, overrideProjectSlug
 	pattern := jsonEscape("sds-" + root + "-github-issue*,-*-raw,-*-for-merge,-*-cache,-*-converted,-*-temp,-*-last-action-date-cache")
 	method := "POST"
 	data := fmt.Sprintf(
-		`{"query":"select uuid, author_id, project_slug, metadata__enriched_on, type, state, merged_by_data_id from \"%s\" `+
+		`{"query":"select id, author_id, project_slug, metadata__enriched_on, type, state, merged_by_data_id from \"%s\" `+
 			`where author_id is not null and is_github_pull_request = 1","fetch_size":%d}`,
 		pattern,
 		10000,
@@ -621,7 +621,7 @@ func datalakeGerritReviewReportForRoot(root, projectSlug string, overrideProject
 	pattern := jsonEscape("sds-" + root + "-gerrit*,-*-raw,-*-for-merge,-*-cache,-*-converted,-*-temp,-*-last-action-date-cache")
 	method := "POST"
 	data := fmt.Sprintf(
-		`{"query":"select uuid, author_id, project_slug, metadata__enriched_on, type, approval_value from \"%s\" `+
+		`{"query":"select id, author_id, project_slug, metadata__enriched_on, type, approval_value from \"%s\" `+
 			`where author_id is not null","fetch_size":%d}`,
 		pattern,
 		10000,
@@ -751,7 +751,7 @@ func datalakeGithubIssueReportForRoot(root, projectSlug string, overrideProjectS
 	pattern := jsonEscape("sds-" + root + "-github-issue*,-*-raw,-*-for-merge,-*-cache,-*-converted,-*-temp,-*-last-action-date-cache")
 	method := "POST"
 	data := fmt.Sprintf(
-		`{"query":"select uuid, author_id, project_slug, metadata__enriched_on, type from \"%s\" `+
+		`{"query":"select id, author_id, project_slug, metadata__enriched_on, type from \"%s\" `+
 			`where author_id is not null and is_github_issue = 1","fetch_size":%d}`,
 		pattern,
 		10000,
@@ -867,11 +867,11 @@ func datalakeJiraIssueReportForRoot(root, projectSlug string, overrideProjectSlu
 			fmt.Printf("got jira issue %s: %v\n", root, issueItems)
 		}()
 	}
+	// can also get status and/or status_category_key
 	pattern := jsonEscape("sds-" + root + "-jira*,-*-raw,-*-for-merge,-*-cache,-*-converted,-*-temp,-*-last-action-date-cache")
 	method := "POST"
-	// can also get status and/or status_category_key
 	data := fmt.Sprintf(
-		`{"query":"select uuid, author_id, project_slug, metadata__enriched_on, type from \"%s\" `+
+		`{"query":"select id, author_id, project_slug, metadata__enriched_on, type from \"%s\" `+
 			`where author_id is not null","fetch_size":%d}`,
 		pattern,
 		10000,
@@ -995,6 +995,7 @@ func datalakeBugzillaIssueReportForRoot(root, projectSlug string, overrideProjec
 	pattern := jsonEscape("sds-" + root + "-" + ds + "*,-*-raw,-*-for-merge,-*-cache,-*-converted,-*-temp,-*-last-action-date-cache")
 	method := "POST"
 	// can also get status and/or status_category_key
+	// TODO: is uuid an unique document key in bugzilla?
 	data := fmt.Sprintf(
 		`{"query":"select uuid, author_id, metadata__enriched_on, status from \"%s\" `+
 			`where author_id is not null","fetch_size":%d}`,
