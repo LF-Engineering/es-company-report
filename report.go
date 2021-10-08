@@ -59,6 +59,7 @@ type contribReport struct {
 }
 
 // LOC stats report item (only git)
+// subrep
 type datalakeLOCReportItem struct {
 	docID       string
 	identityID  string
@@ -70,14 +71,23 @@ type datalakeLOCReportItem struct {
 	filtered    bool
 }
 
-// This is a data returned from a single datalake report for project
-type datalakeData struct {
-	locItems []datalakeLOCReportItem
+// Docs stats report item (only git)
+// subrep
+type datalakeDocReportItem struct {
+	docID       string
+	identityID  string
+	dataSource  string
+	projectSlug string
+	createdAt   time.Time
+	actionType  string
+	filtered    bool
 }
 
 // datalakeReport - full report structure
+// subrep
 type datalakeReport struct {
 	locItems []datalakeLOCReportItem
+	docItems []datalakeDocReportItem
 }
 
 func fatalError(err error) {
@@ -306,16 +316,17 @@ func applySlugMapping(slug string) (daName, sfName string, found bool) {
 	return
 }
 
+// subrep
 func datalakeLOCReportForRoot(root, projectSlug string, overrideProjectSlug bool) (locItems []datalakeLOCReportItem) {
 	if gDbg {
 		defer func() {
-			fmt.Printf("got %s: %v\n", root, locItems)
+			fmt.Printf("got LOC %s: %v\n", root, locItems)
 		}()
 	}
 	pattern := jsonEscape("sds-" + root + "-git,sds-" + root + "-git-*,-*-raw,-*-for-merge,-*-cache,-*-converted,-*-temp,-*-last-action-date-cache")
 	method := "POST"
 	data := fmt.Sprintf(
-		`{"query":"select uuid, author_id, project_slug, metadata__updated_on, lines_added, lines_removed from \"%s\" `+
+		`{"query":"select uuid, author_id, project_slug, metadata__enriched_on, lines_added, lines_removed from \"%s\" `+
 			`where author_id is not null and type = 'commit' and (lines_added > 0 or lines_removed > 0)","fetch_size":%d}`,
 		pattern,
 		10000,
@@ -427,7 +438,126 @@ func datalakeLOCReportForRoot(root, projectSlug string, overrideProjectSlug bool
 	return
 }
 
-func datalakeReportForRoot(ch chan datalakeData, root string, dataSourceTypes []string, bLOC bool) (itemData datalakeData) {
+// subrep
+func datalakeDocReportForRoot(root, projectSlug string, overrideProjectSlug bool) (docItems []datalakeDocReportItem) {
+	if gDbg {
+		defer func() {
+			fmt.Printf("got docs %s: %v\n", root, docItems)
+		}()
+	}
+	pattern := jsonEscape("sds-" + root + "-confluence,sds-" + root + "-confluence-*,-*-raw,-*-for-merge,-*-cache,-*-converted,-*-temp,-*-last-action-date-cache")
+	method := "POST"
+	data := fmt.Sprintf(
+		`{"query":"select uuid, author_id, project_slug, metadata__enriched_on, type from \"%s\" `+
+			`where author_id is not null","fetch_size":%d}`,
+		pattern,
+		10000,
+	)
+	payloadBytes := []byte(data)
+	payloadBody := bytes.NewReader(payloadBytes)
+	url := gESURL + "/_sql?format=json"
+	req, err := http.NewRequest(method, url, payloadBody)
+	fatalError(err)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	fatalError(err)
+	body, err := ioutil.ReadAll(resp.Body)
+	fatalError(err)
+	_ = resp.Body.Close()
+	type resultType struct {
+		Cursor string          `json:"cursor"`
+		Rows   [][]interface{} `json:"rows"`
+		Error  struct {
+			Type   string `json:"type"`
+			Reason string `json:"reason"`
+		} `json:"error"`
+	}
+	var result resultType
+	err = jsoniter.Unmarshal(body, &result)
+	fatalError(err)
+	if result.Error.Type != "" || result.Error.Reason != "" {
+		// Error in this case is allowed
+		if gDbg {
+			fmt.Printf("datalakeDocReportForRoot: error for %s: %v\n", pattern, result.Error)
+		}
+		return
+	}
+	if len(result.Rows) == 0 {
+		return
+	}
+	var pSlug string
+	if overrideProjectSlug {
+		pSlug = projectSlug
+	}
+	processResults := func() {
+		for _, row := range result.Rows {
+      // [cff117ac4b479e31473727cd775f7e96746e7e7e 9e7702dd25aac483d9104b4ba93fa1b73c751083 academy-software-foundation/academy-software-foundation-common 2021-10-01T05:14:53.931Z page]
+			documentID, _ := row[0].(string)
+			identityID, _ := row[1].(string)
+			if !overrideProjectSlug {
+				pSlug, _ = row[2].(string)
+			}
+			createdAt, _ := timeParseES(row[3].(string))
+			actionType, _ := row[4].(string)
+			item := datalakeDocReportItem{
+				docID:       documentID,
+				identityID:  identityID,
+				dataSource:  "git",
+				projectSlug: pSlug,
+				createdAt:   createdAt,
+				actionType:  actionType,
+				filtered:    false,
+			}
+			docItems = append(docItems, item)
+		}
+	}
+	processResults()
+	for {
+		if result.Cursor == "" {
+			break
+		}
+		data = `{"cursor":"` + result.Cursor + `"}`
+		//fmt.Printf("data=%s\n", data)
+		payloadBytes = []byte(data)
+		payloadBody = bytes.NewReader(payloadBytes)
+		req, err = http.NewRequest(method, url, payloadBody)
+		fatalError(err)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err = http.DefaultClient.Do(req)
+		fatalError(err)
+		body, err = ioutil.ReadAll(resp.Body)
+		fatalError(err)
+		err = jsoniter.Unmarshal(body, &result)
+		fatalError(err)
+		if result.Error.Type != "" || result.Error.Reason != "" {
+			fmt.Printf("datalakeDocReportForRoot: error for %s: %v\n", pattern, result.Error)
+			break
+		}
+		if len(result.Rows) == 0 {
+			break
+		}
+		processResults()
+	}
+	if result.Cursor == "" {
+		return
+	}
+	url = gESURL + "/_sql/close"
+	data = `{"cursor":"` + result.Cursor + `"}`
+	payloadBytes = []byte(data)
+	payloadBody = bytes.NewReader(payloadBytes)
+	req, err = http.NewRequest(method, url, payloadBody)
+	fatalError(err)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err = http.DefaultClient.Do(req)
+	fatalError(err)
+	body, err = ioutil.ReadAll(resp.Body)
+	fatalError(err)
+	_ = resp.Body.Close()
+	return
+}
+
+// subrep
+func datalakeReportForRoot(ch chan datalakeReport, root string, dataSourceTypes []string, bLOC, bDocs bool) (itemData datalakeReport) {
 	defer func() {
 		ch <- itemData
 	}()
@@ -437,6 +567,9 @@ func datalakeReportForRoot(ch chan datalakeData, root string, dataSourceTypes []
 	}
 	if bLOC {
 		itemData.locItems = datalakeLOCReportForRoot(root, daName, found)
+	}
+	if bDocs {
+		itemData.docItems = datalakeDocReportForRoot(root, daName, found)
 	}
 	return
 }
@@ -984,7 +1117,58 @@ func saveDatalakeLOCReport(report []datalakeLOCReportItem) {
 	defer func() { _ = file.Close() }()
 	writer = csv.NewWriter(file)
 	defer writer.Flush()
-	fatalError(writer.Write([]string{"ES Document Id", "Identity Id", "Datasource", "Insights project slug", "CreatedAt", "LOC Added", "LOC Deleted", "Filtered"}))
+	fatalError(writer.Write([]string{"ES Document Id", "Identity Id", "Datasource", "Insights Project Slug", "Created At", "LOC Added", "LOC Deleted", "Filtered"}))
+	for _, row := range rows {
+		fatalError(writer.Write(row))
+	}
+}
+
+func toDocType(inType string) string {
+	switch inType {
+	case "attachment":
+		return "Attachment added"
+	case "comment":
+		return "Commented"
+	case "new_page":
+		return "Page created"
+	case "page":
+		return "Page edited"
+	default:
+		return "?"
+	}
+}
+
+func saveDatalakeDocsReport(report []datalakeDocReportItem) {
+	rows := [][]string{}
+	for _, item := range report {
+		filtered := "0"
+		if item.filtered {
+			filtered = "1"
+		}
+		row := []string{
+			item.docID,
+			item.identityID,
+			item.dataSource,
+			item.projectSlug,
+			toYMDHMSDate(item.createdAt),
+			toDocType(item.actionType),
+			filtered,
+		}
+		rows = append(rows, row)
+	}
+	sort.Slice(
+		rows,
+		func(i, j int) bool {
+			return rows[i][4] > rows[j][4]
+		},
+	)
+	var writer *csv.Writer
+	file, err := os.Create("datalake_docs.csv")
+	fatalError(err)
+	defer func() { _ = file.Close() }()
+	writer = csv.NewWriter(file)
+	defer writer.Flush()
+	fatalError(writer.Write([]string{"ES Document Id", "Identity Id", "Datasource", "Insights Project Slug", "Created At", "Type", "Filtered"}))
 	for _, row := range rows {
 		fatalError(writer.Write(row))
 	}
@@ -1022,7 +1206,8 @@ func genOrgReport(roots, dataSourceTypes []string) {
 	saveSummaryOrgReport(report.summary)
 }
 
-func dedupDatalakeReport(report *datalakeReport, bLOC bool) {
+// subrep
+func dedupDatalakeReport(report *datalakeReport, bLOC, bDocs bool) {
 	if bLOC {
 		locDocIDs := map[string]struct{}{}
 		locItems := []datalakeLOCReportItem{}
@@ -1040,9 +1225,27 @@ func dedupDatalakeReport(report *datalakeReport, bLOC bool) {
 			fmt.Printf("no duplicate elements found, LOC items: %d\n", len(report.locItems))
 		}
 	}
+	if bDocs {
+		docDocIDs := map[string]struct{}{}
+		docItems := []datalakeDocReportItem{}
+		for _, docItem := range report.docItems {
+			_, ok := docDocIDs[docItem.docID]
+			if !ok {
+				docItems = append(docItems, docItem)
+				docDocIDs[docItem.docID] = struct{}{}
+			}
+		}
+		if len(docItems) != len(report.docItems) {
+			fmt.Printf("Docs data dedup: %d -> %d\n", len(report.docItems), len(docItems))
+			report.docItems = docItems
+		} else {
+			fmt.Printf("no duplicate elements found, docs items: %d\n", len(report.docItems))
+		}
+	}
 }
 
-func filterDatalakeReport(report *datalakeReport, identityIDs map[string]struct{}, bLOC bool) {
+// subrep
+func filterDatalakeReport(report *datalakeReport, identityIDs map[string]struct{}, bLOC, bDocs bool) {
 	if bLOC {
 		locFiltered := 0
 		for i, locItem := range report.locItems {
@@ -1056,6 +1259,21 @@ func filterDatalakeReport(report *datalakeReport, identityIDs map[string]struct{
 			fmt.Printf("filtered %d/%d loc items\n", locFiltered, len(report.locItems))
 		} else {
 			fmt.Printf("all %d LOC items also present in SH DB loc items\n", len(report.locItems))
+		}
+	}
+	if bDocs {
+		docFiltered := 0
+		for i, docItem := range report.docItems {
+			_, ok := identityIDs[docItem.identityID]
+			if !ok {
+				report.docItems[i].filtered = true
+				docFiltered++
+			}
+		}
+		if docFiltered > 0 {
+			fmt.Printf("filtered %d/%d docs items\n", docFiltered, len(report.docItems))
+		} else {
+			fmt.Printf("all %d docs items also present in SH DB doc items\n", len(report.docItems))
 		}
 	}
 }
@@ -1096,10 +1314,12 @@ func genDatalakeReport(roots, dataSourceTypes []string) {
 	runtime.GOMAXPROCS(thrN)
 	chIdentIDs := make(chan map[string]struct{})
 	go getAffiliatedNonBotIdentities(chIdentIDs)
-	ch := make(chan datalakeData)
+	ch := make(chan datalakeReport)
 	report := datalakeReport{}
 	nThreads := 0
+	// subrep
 	_, bLOC := gSubReport["loc"]
+	_, bDocs := gSubReport["docs"]
 	processData := func() {
 		data := <-ch
 		nThreads--
@@ -1108,9 +1328,15 @@ func genDatalakeReport(roots, dataSourceTypes []string) {
 				report.locItems = append(report.locItems, item)
 			}
 		}
+		if bDocs {
+			for _, item := range data.docItems {
+				report.docItems = append(report.docItems, item)
+			}
+		}
 	}
 	for _, root := range roots {
-		go datalakeReportForRoot(ch, root, dataSourceTypes, bLOC)
+		// subrep
+		go datalakeReportForRoot(ch, root, dataSourceTypes, bLOC, bDocs)
 		nThreads++
 		if nThreads == thrN {
 			processData()
@@ -1119,12 +1345,16 @@ func genDatalakeReport(roots, dataSourceTypes []string) {
 	for nThreads > 0 {
 		processData()
 	}
-	dedupDatalakeReport(&report, bLOC)
+	// subrep
+	dedupDatalakeReport(&report, bLOC, bDocs)
 	identityIDs := <-chIdentIDs
 	fmt.Printf("%d non-bot identities having at least one enrollment present in SH DB\n", len(identityIDs))
-	filterDatalakeReport(&report, identityIDs, bLOC)
+	filterDatalakeReport(&report, identityIDs, bLOC, bDocs)
 	if bLOC {
 		saveDatalakeLOCReport(report.locItems)
+	}
+	if bDocs {
+		saveDatalakeDocsReport(report.docItems)
 	}
 }
 
@@ -1169,6 +1399,7 @@ func setupEnvs() {
 			subs = "loc,prs,issues,docs"
 		}
 		ary := strings.Split(subs, ",")
+		// subrep
 		gSubReport = make(map[string]struct{})
 		for _, sub := range ary {
 			gSubReport[strings.TrimSpace(sub)] = struct{}{}
