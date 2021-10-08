@@ -30,6 +30,7 @@ var (
 	gTo         string
 	gDbg        bool
 	gDatasource map[string]struct{}
+	gSubReport  map[string]struct{}
 	gAll        map[string]struct{}
 )
 
@@ -426,7 +427,7 @@ func datalakeLOCReportForRoot(root, projectSlug string, overrideProjectSlug bool
 	return
 }
 
-func datalakeReportForRoot(ch chan datalakeData, root string, dataSourceTypes []string) (itemData datalakeData) {
+func datalakeReportForRoot(ch chan datalakeData, root string, dataSourceTypes []string, bLOC bool) (itemData datalakeData) {
 	defer func() {
 		ch <- itemData
 	}()
@@ -434,7 +435,9 @@ func datalakeReportForRoot(ch chan datalakeData, root string, dataSourceTypes []
 	if gDbg {
 		fmt.Printf("running for: %s %v -> %s,%s,%v\n", root, dataSourceTypes, daName, sfName, found)
 	}
-	itemData.locItems = datalakeLOCReportForRoot(root, daName, found)
+	if bLOC {
+		itemData.locItems = datalakeLOCReportForRoot(root, daName, found)
+	}
 	return
 }
 
@@ -1019,37 +1022,41 @@ func genOrgReport(roots, dataSourceTypes []string) {
 	saveSummaryOrgReport(report.summary)
 }
 
-func dedupDatalakeReport(report *datalakeReport) {
-	locDocIDs := map[string]struct{}{}
-	locItems := []datalakeLOCReportItem{}
-	for _, locItem := range report.locItems {
-		_, ok := locDocIDs[locItem.docID]
-		if !ok {
-			locItems = append(locItems, locItem)
-			locDocIDs[locItem.docID] = struct{}{}
+func dedupDatalakeReport(report *datalakeReport, bLOC bool) {
+	if bLOC {
+		locDocIDs := map[string]struct{}{}
+		locItems := []datalakeLOCReportItem{}
+		for _, locItem := range report.locItems {
+			_, ok := locDocIDs[locItem.docID]
+			if !ok {
+				locItems = append(locItems, locItem)
+				locDocIDs[locItem.docID] = struct{}{}
+			}
 		}
-	}
-	if len(locItems) != len(report.locItems) {
-		fmt.Printf("LOC data dedup: %d -> %d\n", len(report.locItems), len(locItems))
-		report.locItems = locItems
-	} else {
-		fmt.Printf("no duplicate elements found, LOC items: %d\n", len(report.locItems))
+		if len(locItems) != len(report.locItems) {
+			fmt.Printf("LOC data dedup: %d -> %d\n", len(report.locItems), len(locItems))
+			report.locItems = locItems
+		} else {
+			fmt.Printf("no duplicate elements found, LOC items: %d\n", len(report.locItems))
+		}
 	}
 }
 
-func filterDatalakeReport(report *datalakeReport, identityIDs map[string]struct{}) {
-	locFiltered := 0
-	for i, locItem := range report.locItems {
-		_, ok := identityIDs[locItem.identityID]
-		if !ok {
-			report.locItems[i].filtered = true
-			locFiltered++
+func filterDatalakeReport(report *datalakeReport, identityIDs map[string]struct{}, bLOC bool) {
+	if bLOC {
+		locFiltered := 0
+		for i, locItem := range report.locItems {
+			_, ok := identityIDs[locItem.identityID]
+			if !ok {
+				report.locItems[i].filtered = true
+				locFiltered++
+			}
 		}
-	}
-	if locFiltered > 0 {
-		fmt.Printf("filtered %d/%d loc items\n", locFiltered, len(report.locItems))
-	} else {
-		fmt.Printf("all %d LOC items also present in SH DB loc items\n", len(report.locItems))
+		if locFiltered > 0 {
+			fmt.Printf("filtered %d/%d loc items\n", locFiltered, len(report.locItems))
+		} else {
+			fmt.Printf("all %d LOC items also present in SH DB loc items\n", len(report.locItems))
+		}
 	}
 }
 
@@ -1083,8 +1090,8 @@ func genDatalakeReport(roots, dataSourceTypes []string) {
 	}
 	thrN := runtime.NumCPU()
 	// xxx
-	// thrN = 1
-	// roots = roots[:10]
+	thrN = 1
+	roots = roots[:10]
 	// xxx
 	runtime.GOMAXPROCS(thrN)
 	chIdentIDs := make(chan map[string]struct{})
@@ -1092,15 +1099,18 @@ func genDatalakeReport(roots, dataSourceTypes []string) {
 	ch := make(chan datalakeData)
 	report := datalakeReport{}
 	nThreads := 0
+	_, bLOC := gSubReport["loc"]
 	processData := func() {
 		data := <-ch
 		nThreads--
-		for _, item := range data.locItems {
-			report.locItems = append(report.locItems, item)
+		if bLOC {
+			for _, item := range data.locItems {
+				report.locItems = append(report.locItems, item)
+			}
 		}
 	}
 	for _, root := range roots {
-		go datalakeReportForRoot(ch, root, dataSourceTypes)
+		go datalakeReportForRoot(ch, root, dataSourceTypes, bLOC)
 		nThreads++
 		if nThreads == thrN {
 			processData()
@@ -1109,11 +1119,13 @@ func genDatalakeReport(roots, dataSourceTypes []string) {
 	for nThreads > 0 {
 		processData()
 	}
-	dedupDatalakeReport(&report)
+	dedupDatalakeReport(&report, bLOC)
 	identityIDs := <-chIdentIDs
 	fmt.Printf("%d non-bot identities having at least one enrollment present in SH DB\n", len(identityIDs))
-	filterDatalakeReport(&report, identityIDs)
-	saveDatalakeLOCReport(report.locItems)
+	filterDatalakeReport(&report, identityIDs, bLOC)
+	if bLOC {
+		saveDatalakeLOCReport(report.locItems)
+	}
 }
 
 func setupSHDB() {
@@ -1152,6 +1164,15 @@ func setupEnvs() {
 			gTo = "2100-01-01T00:00:00"
 		}
 	case "datalake":
+		subs := strings.TrimSpace(os.Getenv("SUB_REPORTS"))
+		if subs == "" {
+			subs = "loc,prs,issues,docs"
+		}
+		ary := strings.Split(subs, ",")
+		gSubReport = make(map[string]struct{})
+		for _, sub := range ary {
+			gSubReport[strings.TrimSpace(sub)] = struct{}{}
+		}
 	default:
 		fatal("unknown report type: " + gReport)
 	}
