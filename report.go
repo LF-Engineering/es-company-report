@@ -504,7 +504,7 @@ func datalakeGithubPRReportForRoot(root, projectSlug string, overrideProjectSlug
 	if result.Error.Type != "" || result.Error.Reason != "" {
 		// Error in this case is allowed
 		if gDbg {
-			fmt.Printf("datalakePRReportForRoot: error for %s: %v\n", pattern, result.Error)
+			fmt.Printf("datalakeGitHubPRReportForRoot: error for %s: %v\n", pattern, result.Error)
 		}
 		return
 	}
@@ -546,7 +546,7 @@ func datalakeGithubPRReportForRoot(root, projectSlug string, overrideProjectSlug
 			item := datalakePRReportItem{
 				docID:       documentID,
 				identityID:  identityID,
-				dataSource:  "git",
+				dataSource:  "github/issue",
 				projectSlug: pSlug,
 				createdAt:   createdAt,
 				actionType:  actionType,
@@ -574,7 +574,137 @@ func datalakeGithubPRReportForRoot(root, projectSlug string, overrideProjectSlug
 		err = jsoniter.Unmarshal(body, &result)
 		fatalError(err)
 		if result.Error.Type != "" || result.Error.Reason != "" {
-			fmt.Printf("datalakePRReportForRoot: error for %s: %v\n", pattern, result.Error)
+			fmt.Printf("datalakeGitHubPRReportForRoot: error for %s: %v\n", pattern, result.Error)
+			break
+		}
+		if len(result.Rows) == 0 {
+			break
+		}
+		processResults()
+	}
+	if result.Cursor == "" {
+		return
+	}
+	url = gESURL + "/_sql/close"
+	data = `{"cursor":"` + result.Cursor + `"}`
+	payloadBytes = []byte(data)
+	payloadBody = bytes.NewReader(payloadBytes)
+	req, err = http.NewRequest(method, url, payloadBody)
+	fatalError(err)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err = http.DefaultClient.Do(req)
+	fatalError(err)
+	body, err = ioutil.ReadAll(resp.Body)
+	fatalError(err)
+	_ = resp.Body.Close()
+	return
+}
+
+// subrep
+func datalakeGerritReviewReportForRoot(root, projectSlug string, overrideProjectSlug bool) (prItems []datalakePRReportItem) {
+	if gDbg {
+		defer func() {
+			fmt.Printf("got gerrit-review %s: %v\n", root, prItems)
+		}()
+	}
+	pattern := jsonEscape("sds-" + root + "-gerrit,sds-" + root + "-gerrit-*,-*-raw,-*-for-merge,-*-cache,-*-converted,-*-temp,-*-last-action-date-cache")
+	method := "POST"
+	data := fmt.Sprintf(
+		`{"query":"select uuid, author_id, project_slug, metadata__enriched_on, type, approval_value from \"%s\" `+
+			`where author_id is not null","fetch_size":%d}`,
+		pattern,
+		10000,
+	)
+	payloadBytes := []byte(data)
+	payloadBody := bytes.NewReader(payloadBytes)
+	url := gESURL + "/_sql?format=json"
+	req, err := http.NewRequest(method, url, payloadBody)
+	fatalError(err)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	fatalError(err)
+	body, err := ioutil.ReadAll(resp.Body)
+	fatalError(err)
+	_ = resp.Body.Close()
+	type resultType struct {
+		Cursor string          `json:"cursor"`
+		Rows   [][]interface{} `json:"rows"`
+		Error  struct {
+			Type   string `json:"type"`
+			Reason string `json:"reason"`
+		} `json:"error"`
+	}
+	var result resultType
+	err = jsoniter.Unmarshal(body, &result)
+	fatalError(err)
+	if result.Error.Type != "" || result.Error.Reason != "" {
+		// Error in this case is allowed
+		if gDbg {
+			fmt.Printf("datalakeGerritReviewReportForRoot: error for %s: %v\n", pattern, result.Error)
+		}
+		return
+	}
+	if len(result.Rows) == 0 {
+		return
+	}
+	var pSlug string
+	if overrideProjectSlug {
+		pSlug = projectSlug
+	}
+	processResults := func() {
+		for _, row := range result.Rows {
+			// [78843539ad1642c4ab74ae6c19772d1a40bf951d a006613a2aefee76acceb8f5fb6867f49c32ebe1 o-ran/shared 2021-09-07T05:56:36.913Z approval 1]
+			// [03c753252a0c27bd890abf272c93e61bb1e28c31 6183ef1a4ac9e5403ff6bf13a1508654def1bb09 o-ran/shared 2021-09-07T05:56:31.998Z patchset <nil>]
+			// [235bff88695c1e049b904edc9b7744357acf11ac 81e04dfee8603594a86b780010f7669650d7f076 lfn/tungsten-fabric 2021-09-07T05:37:36.574Z comment <nil>]
+			documentID, _ := row[0].(string)
+			identityID, _ := row[1].(string)
+			if !overrideProjectSlug {
+				pSlug, _ = row[2].(string)
+			}
+			createdAt, _ := timeParseES(row[3].(string))
+			actionType, _ := row[4].(string)
+			approvalValue, _ := row[5].(string)
+			// fmt.Printf("(%s,%s)\n", actionType, approvalValue)
+			if actionType == "approval" {
+				switch approvalValue {
+				case "-1", "-2":
+					actionType = "Gerrit review rejected"
+				case "0", "1", "2":
+					actionType = "Gerrit review approved"
+				}
+			}
+			item := datalakePRReportItem{
+				docID:       documentID,
+				identityID:  identityID,
+				dataSource:  "gerrit",
+				projectSlug: pSlug,
+				createdAt:   createdAt,
+				actionType:  actionType,
+				filtered:    false,
+			}
+			prItems = append(prItems, item)
+		}
+	}
+	processResults()
+	for {
+		if result.Cursor == "" {
+			break
+		}
+		data = `{"cursor":"` + result.Cursor + `"}`
+		//fmt.Printf("data=%s\n", data)
+		payloadBytes = []byte(data)
+		payloadBody = bytes.NewReader(payloadBytes)
+		req, err = http.NewRequest(method, url, payloadBody)
+		fatalError(err)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err = http.DefaultClient.Do(req)
+		fatalError(err)
+		body, err = ioutil.ReadAll(resp.Body)
+		fatalError(err)
+		err = jsoniter.Unmarshal(body, &result)
+		fatalError(err)
+		if result.Error.Type != "" || result.Error.Reason != "" {
+			fmt.Printf("datalakeGerritReviewReportForRoot: error for %s: %v\n", pattern, result.Error)
 			break
 		}
 		if len(result.Rows) == 0 {
@@ -664,7 +794,7 @@ func datalakeDocReportForRoot(root, projectSlug string, overrideProjectSlug bool
 			item := datalakeDocReportItem{
 				docID:       documentID,
 				identityID:  identityID,
-				dataSource:  "git",
+				dataSource:  "confluence",
 				projectSlug: pSlug,
 				createdAt:   createdAt,
 				actionType:  actionType,
@@ -735,13 +865,10 @@ func datalakeReportForRoot(ch chan datalakeReport, root string, dataSourceTypes 
 	}
 	if bPRs {
 		itemData.prItems = datalakeGithubPRReportForRoot(root, daName, found)
-		// xxx
-		/*
-		   prItems := datalakeGerritReviewReportForRoot(root, daName, found)
-		   if len(prItems) > 0 {
-		     itemData.prItems = append(itemData.prItems, prItems...)
-		   }
-		*/
+		prItems := datalakeGerritReviewReportForRoot(root, daName, found)
+		if len(prItems) > 0 {
+			itemData.prItems = append(itemData.prItems, prItems...)
+		}
 	}
 	// xxx
 	/*
@@ -1324,14 +1451,6 @@ func toIssueType(inType string) string {
 }
 
 func toPRType(inType string) string {
-	// xxx
-	/*
-	  gerrit:
-	  approval
-	  changeset
-	  comment
-	  patchset
-	*/
 	switch inType {
 	case "pull_request":
 		return "PR submitted"
@@ -1345,8 +1464,16 @@ func toPRType(inType string) string {
 		return "PR requested reviewer assignment"
 	case "pull_request_review":
 		return "PR review"
-	case "PR approved", "PR changes requested", "PR review comment", "PR merged":
+	case "PR approved", "PR changes requested", "PR review comment", "PR merged", "Gerrit review rejected", "Gerrit review approved":
 		return inType
+	case "approval":
+		return "Gerrit approval added"
+	case "changeset":
+		return "Gerrit change set created"
+	case "comment":
+		return "Gerrit comment"
+	case "patchset":
+		return "Gerrit patch set created"
 	default:
 		fmt.Printf("unknown PR action type: %s\n", inType)
 		return "?"
@@ -1674,8 +1801,8 @@ func genDatalakeReport(roots, dataSourceTypes []string) {
 	}
 	thrN := runtime.NumCPU()
 	// xxx
-	thrN = 1
-	roots = roots[:10]
+	// thrN = 1
+	// roots = roots[:10]
 	// xxx
 	runtime.GOMAXPROCS(thrN)
 	chIdentIDs := make(chan map[string]struct{})
