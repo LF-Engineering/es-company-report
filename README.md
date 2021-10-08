@@ -7,5 +7,6 @@ Report given company's contribution data stored in ElasticSearch
 - Specify report type via `REPORT=org`.
 - Provide your `ES_URL.${env_name}.secret` value(s).
 - Provide your `DB_URL.${env_name}.secret` value(s).
-- Run `[FROM=YYYY-MM-DD] [TO=YYYY-MM-DD] REPORT=org ORG='Facebook, Inc.' ./run.sh env_name`.
+- Run `[DBG=1] [FROM=YYYY-MM-DD] [TO=YYYY-MM-DD] REPORT=org ORG='Facebook, Inc.' ./run.sh env_name`.
+- Run `[DBG=1] [DATASOURCES='git,github-issue,gerrit,jira,bugzilla,bugzillarest,confluence'] REPORT=datalake ./run.sh env_name`.
 

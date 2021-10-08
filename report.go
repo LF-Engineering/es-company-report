@@ -22,14 +22,15 @@ import (
 )
 
 var (
-	gReport string
-	gESURL  string
-	gDB     *sqlx.DB
-	gOrg    string
-	gFrom   string
-	gTo     string
-	gDbg    bool
-	gAll    map[string]struct{}
+	gReport     string
+	gESURL      string
+	gDB         *sqlx.DB
+	gOrg        string
+	gFrom       string
+	gTo         string
+	gDbg        bool
+	gDatasource map[string]struct{}
+	gAll        map[string]struct{}
 )
 
 // contributor name, email address, project slug and affiliation date range
@@ -75,7 +76,7 @@ func getIndices(res map[string]interface{}) (indices []string) {
 		if !strings.HasPrefix(idx, "sds-") {
 			continue
 		}
-		if strings.HasSuffix(idx, "-raw") || strings.HasSuffix(idx, "-for-merge") || strings.HasSuffix(idx, "-cache") || strings.HasSuffix(idx, "-converted") || strings.HasSuffix(idx, "-temp") {
+		if strings.HasSuffix(idx, "-raw") || strings.HasSuffix(idx, "-for-merge") || strings.HasSuffix(idx, "-cache") || strings.HasSuffix(idx, "-converted") || strings.HasSuffix(idx, "-temp") || strings.HasSuffix(idx, "-last-action-date-cache") {
 			continue
 		}
 		indices = append(indices, idx)
@@ -88,48 +89,93 @@ func getIndices(res map[string]interface{}) (indices []string) {
 	return
 }
 
-func getRoots(indices, aliases []string) (roots []string) {
+func getRoots(indices, aliases []string) (roots, dsa []string) {
 	fmt.Printf("%d indices, %d aliases\n", len(indices), len(aliases))
 	dss := make(map[string]struct{})
 	all := make(map[string]struct{})
+	var reported map[string]struct{}
+	if gDbg {
+		reported = make(map[string]struct{})
+	}
 	for _, idx := range indices {
 		ary := strings.Split(idx, "-")
 		lAry := len(ary)
 		ds := ary[lAry-1]
-		dss[ds] = struct{}{}
 		root := strings.Join(ary[1:lAry-1], "-")
 		if strings.HasSuffix(root, "-github") {
 			root = root[:len(root)-7]
+			ds = "github-" + ds
 		}
 		if root == "" {
 			continue
 		}
+		if gDatasource != nil {
+			_, ok := gDatasource[ds]
+			if !ok {
+				if gDbg {
+					_, rep := reported[ds]
+					if !rep {
+						fmt.Printf("data source '%s' not on the data source list, skipping\n", ds)
+						reported[ds] = struct{}{}
+					}
+				}
+				continue
+			}
+			if gDbg {
+				_, rep := reported[ds]
+				if !rep {
+					fmt.Printf("data source '%s' included\n", ds)
+					reported[ds] = struct{}{}
+				}
+			}
+		}
+		dss[ds] = struct{}{}
 		all[root] = struct{}{}
 	}
 	for _, idx := range aliases {
 		ary := strings.Split(idx, "-")
 		lAry := len(ary)
 		ds := ary[lAry-1]
-		dss[ds] = struct{}{}
 		root := strings.Join(ary[1:lAry-1], "-")
 		if strings.HasSuffix(root, "-github") {
 			root = root[:len(root)-7]
+			ds = "github-" + ds
 		}
 		if root == "" {
 			continue
 		}
+		if gDatasource != nil {
+			_, ok := gDatasource[ds]
+			if !ok {
+				if gDbg {
+					_, rep := reported[ds]
+					if !rep {
+						fmt.Printf("data source '%s' not on the data source list, skipping\n", ds)
+						reported[ds] = struct{}{}
+					}
+				}
+				continue
+			}
+			if gDbg {
+				_, rep := reported[ds]
+				if !rep {
+					fmt.Printf("data source '%s' included\n", ds)
+					reported[ds] = struct{}{}
+				}
+			}
+		}
+		dss[ds] = struct{}{}
 		all[root] = struct{}{}
 	}
 	fmt.Printf("%d data source types\n", len(dss))
 	for root := range all {
 		roots = append(roots, root)
 	}
+	for ds := range dss {
+		dsa = append(dsa, ds)
+	}
+	sort.Strings(dsa)
 	if gDbg {
-		dsa := []string{}
-		for ds := range dss {
-			dsa = append(dsa, ds)
-		}
-		sort.Strings(dsa)
 		fmt.Printf("data source types: %v\n", dsa)
 	}
 	sort.Strings(roots)
@@ -140,7 +186,7 @@ func getRoots(indices, aliases []string) (roots []string) {
 	return
 }
 
-func getSlugRoots() (slugRoots []string) {
+func getSlugRoots() (slugRoots, dataSourceTypes []string) {
 	method := "GET"
 	url := gESURL + "/_cat/indices?format=json"
 	req, err := http.NewRequest(method, url, nil)
@@ -169,7 +215,7 @@ func getSlugRoots() (slugRoots []string) {
 	err = jsoniter.Unmarshal(body, &result)
 	fatalError(err)
 	aliases := getIndices(result)
-	slugRoots = getRoots(indices, aliases)
+	slugRoots, dataSourceTypes = getRoots(indices, aliases)
 	return
 }
 
@@ -236,7 +282,7 @@ func reportForRoot(ch chan []contribReportItem, root string) (items []contribRep
 	}()
 	sfName := applySlugMapping(root)
 	// fmt.Printf("running for: %s -> %s\n", root, sfName)
-	pattern := jsonEscape("sds-" + root + "-*,-*-raw,-*-for-merge,-*-cache,-*-converted,-*-temp")
+	pattern := jsonEscape("sds-" + root + "-*,-*-raw,-*-for-merge,-*-cache,-*-converted,-*-temp,-*-last-action-date-cache")
 	method := "POST"
 	data := fmt.Sprintf(
 		`{"query":"select author_uuid, count(*) as cnt, min(metadata__updated_on) as f, max(metadata__updated_on) as t, project from \"%s\" `+
@@ -742,7 +788,7 @@ func saveSummaryReport(report map[string]contribReportItem) {
 	}
 }
 
-func genReport(roots []string) {
+func genOrgReport(roots, dataSourceTypes []string) {
 	thrN := runtime.NumCPU()
 	// thrN = 1
 	// roots = roots[:10]
@@ -772,6 +818,11 @@ func genReport(roots []string) {
 	summaryReport(&report)
 	saveReport(report.items)
 	saveSummaryReport(report.summary)
+}
+
+func genDatalakeReport(roots, dataSourceTypes []string) {
+	fmt.Printf("Datalake report for data source types %+v\n", dataSourceTypes)
+	fmt.Printf("Datalake report for projects %+v\n", roots)
 }
 
 func setupSHDB() {
@@ -809,8 +860,17 @@ func setupEnvs() {
 		if gTo == "" {
 			gTo = "2100-01-01T00:00:00"
 		}
+	case "datalake":
 	default:
 		fatal("unknown report type: " + gReport)
+	}
+	sDSes := strings.TrimSpace(os.Getenv("DATASOURCES"))
+	if sDSes != "" {
+		ary := strings.Split(sDSes, ",")
+		gDatasource = make(map[string]struct{})
+		for _, ds := range ary {
+			gDatasource[strings.TrimSpace(ds)] = struct{}{}
+		}
 	}
 	gAll = make(map[string]struct{})
 }
@@ -820,6 +880,8 @@ func main() {
 	setupSHDB()
 	switch gReport {
 	case "org":
-		genReport(getSlugRoots())
+		genOrgReport(getSlugRoots())
+	case "datalake":
+		genDatalakeReport(getSlugRoots())
 	}
 }
