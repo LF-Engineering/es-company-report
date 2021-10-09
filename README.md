@@ -13,3 +13,4 @@ Report given company's contribution data stored in ElasticSearch
 # Example
 
 - `DBG=1 PROGRESS=1 REPORT=datalake MAX_THREADS=10 DATASOURCES='git,github-issue,gerrit,jira,bugzilla,bugzillarest,confluence' SUB_REPORTS=docs NAME_PREFIX=test ./run.sh test | tee test_datalake_docs.log`.
+- `REPORT=datalake MAX_THREADS=8 DATASOURCES='git,github-issue,gerrit,jira,bugzilla,bugzillarest,confluence' NAME_PREFIX=prod ./run.sh prod | tee prod_datalake.log`.
