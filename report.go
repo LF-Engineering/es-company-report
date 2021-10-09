@@ -2046,7 +2046,8 @@ func saveOrgReport(report []contribReportItem) {
 		},
 	)
 	var writer *csv.Writer
-	file, err := os.Create(gNamePrefix + "report.csv")
+	fn := gNamePrefix + "report.csv"
+	file, err := os.Create(fn)
 	fatalError(err)
 	defer func() { _ = file.Close() }()
 	writer = csv.NewWriter(file)
@@ -2055,6 +2056,7 @@ func saveOrgReport(report []contribReportItem) {
 	for _, row := range rows {
 		fatalError(writer.Write(row))
 	}
+	fmt.Printf("%s saved\n", fn)
 }
 
 func saveSummaryOrgReport(report map[string]contribReportItem) {
@@ -2091,7 +2093,8 @@ func saveSummaryOrgReport(report map[string]contribReportItem) {
 		},
 	)
 	var writer *csv.Writer
-	file, err := os.Create(gNamePrefix + "summary.csv")
+	fn := gNamePrefix + "summary.csv"
+	file, err := os.Create(fn)
 	fatalError(err)
 	defer func() { _ = file.Close() }()
 	writer = csv.NewWriter(file)
@@ -2100,6 +2103,7 @@ func saveSummaryOrgReport(report map[string]contribReportItem) {
 	for _, row := range rows {
 		fatalError(writer.Write(row))
 	}
+	fmt.Printf("%s saved\n", fn)
 }
 
 // subrep
@@ -2130,7 +2134,8 @@ func saveDatalakeLOCReport(report []datalakeLOCReportItem) {
 		},
 	)
 	var writer *csv.Writer
-	file, err := os.Create(gNamePrefix + "datalake_loc.csv")
+	fn := gNamePrefix + "datalake_loc.csv"
+	file, err := os.Create(fn)
 	fatalError(err)
 	defer func() { _ = file.Close() }()
 	writer = csv.NewWriter(file)
@@ -2139,6 +2144,7 @@ func saveDatalakeLOCReport(report []datalakeLOCReportItem) {
 	for _, row := range rows {
 		fatalError(writer.Write(row))
 	}
+	fmt.Printf("%s saved\n", fn)
 }
 
 func toIssueType(inType string) string {
@@ -2225,7 +2231,8 @@ func saveDatalakePRsReport(report []datalakePRReportItem) {
 		},
 	)
 	var writer *csv.Writer
-	file, err := os.Create(gNamePrefix + "datalake_prs.csv")
+	fn := gNamePrefix + "datalake_prs.csv"
+	file, err := os.Create(fn)
 	fatalError(err)
 	defer func() { _ = file.Close() }()
 	writer = csv.NewWriter(file)
@@ -2234,6 +2241,7 @@ func saveDatalakePRsReport(report []datalakePRReportItem) {
 	for _, row := range rows {
 		fatalError(writer.Write(row))
 	}
+	fmt.Printf("%s saved\n", fn)
 }
 
 // subrep
@@ -2263,7 +2271,8 @@ func saveDatalakeIssuesReport(report []datalakeIssueReportItem) {
 		},
 	)
 	var writer *csv.Writer
-	file, err := os.Create(gNamePrefix + "datalake_issues.csv")
+	fn := gNamePrefix + "datalake_issues.csv"
+	file, err := os.Create(fn)
 	fatalError(err)
 	defer func() { _ = file.Close() }()
 	writer = csv.NewWriter(file)
@@ -2272,6 +2281,7 @@ func saveDatalakeIssuesReport(report []datalakeIssueReportItem) {
 	for _, row := range rows {
 		fatalError(writer.Write(row))
 	}
+	fmt.Printf("%s saved\n", fn)
 }
 
 func toDocType(inType string) string {
@@ -2316,7 +2326,8 @@ func saveDatalakeDocsReport(report []datalakeDocReportItem) {
 		},
 	)
 	var writer *csv.Writer
-	file, err := os.Create(gNamePrefix + "datalake_docs.csv")
+	fn := gNamePrefix + "datalake_docs.csv"
+	file, err := os.Create(fn)
 	fatalError(err)
 	defer func() { _ = file.Close() }()
 	writer = csv.NewWriter(file)
@@ -2325,6 +2336,7 @@ func saveDatalakeDocsReport(report []datalakeDocReportItem) {
 	for _, row := range rows {
 		fatalError(writer.Write(row))
 	}
+	fmt.Printf("%s saved\n", fn)
 }
 
 func genOrgReport(roots, dataSourceTypes []string) {
