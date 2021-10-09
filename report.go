@@ -347,7 +347,7 @@ func applySlugMapping(slug string, useDAWhenNotFound bool) (daName, sfName strin
 			return
 		}
 		if !found {
-			fmt.Printf("slug mapping not found: %s -> %+v -> %s,%s", slug, slugs, daName, sfName)
+			fmt.Printf("slug mapping not found: %s -> %+v -> %s,%s\n", slug, slugs, daName, sfName)
 		}
 	}()
 	ary := strings.Split(slug, "-")
@@ -357,16 +357,46 @@ func applySlugMapping(slug string, useDAWhenNotFound bool) (daName, sfName strin
 	}
 	if strings.HasSuffix(slug, "-shared") {
 		newSlug := slug[:len(slug)-7]
-		fmt.Printf("shared slug detected: '%s' -> '%s'\n", slug, newSlug)
+		if gDbg {
+			fmt.Printf("shared slug detected: '%s' -> '%s'\n", slug, newSlug)
+		}
+		slugs = append(slugs, newSlug)
 		ary := strings.Split(newSlug, "-")
 		n := len(ary)
 		for i := 1; i < n; i++ {
 			slugs = append(slugs, strings.Join(ary[:i], "-")+"/"+strings.Join(ary[i:], "-"))
 		}
 	}
+	if strings.HasSuffix(slug, "-common") {
+		newSlug := slug[:len(slug)-7]
+		if gDbg {
+			fmt.Printf("common slug detected: '%s' -> '%s'\n", slug, newSlug)
+		}
+		slugs = append(slugs, newSlug)
+		ary := strings.Split(newSlug, "-")
+		n := len(ary)
+		for i := 1; i < n; i++ {
+			slugs = append(slugs, strings.Join(ary[:i], "-")+"/"+strings.Join(ary[i:], "-"))
+		}
+		if n > 1 {
+			ary = ary[:n-1]
+			n--
+			newSlug := strings.Join(ary, "-")
+			slugs = append(slugs, newSlug)
+			if gDbg {
+				fmt.Printf("common slug detected (2nd attempt): '%s' -> '%s'\n", slug, newSlug)
+			}
+			for i := 1; i < n; i++ {
+				slugs = append(slugs, strings.Join(ary[:i], "-")+"/"+strings.Join(ary[i:], "-"))
+			}
+		}
+	}
 	if strings.HasSuffix(slug, "-f") {
 		newSlug := slug[:len(slug)-2]
-		fmt.Printf("dash-f slug detected: '%s' -> '%s'\n", slug, newSlug)
+		if gDbg {
+			fmt.Printf("dash-f slug detected: '%s' -> '%s'\n", slug, newSlug)
+		}
+		slugs = append(slugs, newSlug)
 		ary := strings.Split(newSlug, "-")
 		n := len(ary)
 		for i := 1; i < n; i++ {
@@ -457,6 +487,7 @@ func datalakeLOCReportForRoot(root, projectSlug, sfSlug string, overrideProjectS
 				identityID:  identityID,
 				dataSource:  "git",
 				projectSlug: pSlug,
+				sfSlug:      sfSlug,
 				createdAt:   createdAt,
 				locAdded:    locAdded,
 				locDeleted:  locDeleted,
@@ -591,6 +622,7 @@ func datalakeGithubPRReportForRoot(root, projectSlug, sfName string, overridePro
 				identityID:  identityID,
 				dataSource:  "github/issue",
 				projectSlug: pSlug,
+				sfSlug:      sfName,
 				createdAt:   createdAt,
 				actionType:  actionType,
 				filtered:    false,
@@ -716,6 +748,7 @@ func datalakeGerritReviewReportForRoot(root, projectSlug, sfName string, overrid
 				identityID:  identityID,
 				dataSource:  "gerrit",
 				projectSlug: pSlug,
+				sfSlug:      sfName,
 				createdAt:   createdAt,
 				actionType:  actionType,
 				filtered:    false,
@@ -830,6 +863,7 @@ func datalakeGithubIssueReportForRoot(root, projectSlug, sfName string, override
 				identityID:  identityID,
 				dataSource:  "github/issue",
 				projectSlug: pSlug,
+				sfSlug:      sfName,
 				createdAt:   createdAt,
 				actionType:  actionType,
 				filtered:    false,
@@ -946,6 +980,7 @@ func datalakeJiraIssueReportForRoot(root, projectSlug, sfName string, overridePr
 				identityID:  identityID,
 				dataSource:  "jira",
 				projectSlug: pSlug,
+				sfSlug:      sfName,
 				createdAt:   createdAt,
 				actionType:  "jira_" + actionType,
 				filtered:    false,
@@ -1059,6 +1094,7 @@ func datalakeBugzillaIssueReportForRoot(root, projectSlug, sfName string, overri
 				identityID:  identityID,
 				dataSource:  ds,
 				projectSlug: projectSlug,
+				sfSlug:      sfName,
 				createdAt:   createdAt,
 				actionType:  "bugzilla:" + status,
 				filtered:    false,
@@ -1172,6 +1208,7 @@ func datalakeDocReportForRoot(root, projectSlug, sfName string, overrideProjectS
 				identityID:  identityID,
 				dataSource:  "confluence",
 				projectSlug: pSlug,
+				sfSlug:      sfName,
 				createdAt:   createdAt,
 				actionType:  actionType,
 				filtered:    false,
@@ -1788,6 +1825,7 @@ func saveDatalakeLOCReport(report []datalakeLOCReportItem) {
 			item.identityID,
 			item.dataSource,
 			item.projectSlug,
+			item.sfSlug,
 			toYMDHMSDate(item.createdAt),
 			strconv.Itoa(item.locAdded),
 			strconv.Itoa(item.locDeleted),
@@ -1798,7 +1836,7 @@ func saveDatalakeLOCReport(report []datalakeLOCReportItem) {
 	sort.Slice(
 		rows,
 		func(i, j int) bool {
-			return rows[i][4] > rows[j][4]
+			return rows[i][5] > rows[j][5]
 		},
 	)
 	var writer *csv.Writer
@@ -1807,7 +1845,7 @@ func saveDatalakeLOCReport(report []datalakeLOCReportItem) {
 	defer func() { _ = file.Close() }()
 	writer = csv.NewWriter(file)
 	defer writer.Flush()
-	fatalError(writer.Write([]string{"ES Document Id", "Identity Id", "Datasource", "Insights Project Slug", "Created At", "LOC Added", "LOC Deleted", "Filtered"}))
+	fatalError(writer.Write([]string{"ES Document Id", "Identity Id", "Datasource", "Insights Project Slug", "Salesforce Project Slug", "Created At", "LOC Added", "LOC Deleted", "Filtered"}))
 	for _, row := range rows {
 		fatalError(writer.Write(row))
 	}
@@ -1883,6 +1921,7 @@ func saveDatalakePRsReport(report []datalakePRReportItem) {
 			item.identityID,
 			item.dataSource,
 			item.projectSlug,
+			item.sfSlug,
 			toYMDHMSDate(item.createdAt),
 			toPRType(item.actionType),
 			filtered,
@@ -1892,7 +1931,7 @@ func saveDatalakePRsReport(report []datalakePRReportItem) {
 	sort.Slice(
 		rows,
 		func(i, j int) bool {
-			return rows[i][4] > rows[j][4]
+			return rows[i][5] > rows[j][5]
 		},
 	)
 	var writer *csv.Writer
@@ -1901,7 +1940,7 @@ func saveDatalakePRsReport(report []datalakePRReportItem) {
 	defer func() { _ = file.Close() }()
 	writer = csv.NewWriter(file)
 	defer writer.Flush()
-	fatalError(writer.Write([]string{"ES Document Id", "Identity Id", "Datasource", "Insights Project Slug", "Created At", "Type", "Filtered"}))
+	fatalError(writer.Write([]string{"ES Document Id", "Identity Id", "Datasource", "Insights Project Slug", "Salesforce Project Slug", "Created At", "Type", "Filtered"}))
 	for _, row := range rows {
 		fatalError(writer.Write(row))
 	}
@@ -1920,6 +1959,7 @@ func saveDatalakeIssuesReport(report []datalakeIssueReportItem) {
 			item.identityID,
 			item.dataSource,
 			item.projectSlug,
+			item.sfSlug,
 			toYMDHMSDate(item.createdAt),
 			toIssueType(item.actionType),
 			filtered,
@@ -1929,7 +1969,7 @@ func saveDatalakeIssuesReport(report []datalakeIssueReportItem) {
 	sort.Slice(
 		rows,
 		func(i, j int) bool {
-			return rows[i][4] > rows[j][4]
+			return rows[i][5] > rows[j][5]
 		},
 	)
 	var writer *csv.Writer
@@ -1938,7 +1978,7 @@ func saveDatalakeIssuesReport(report []datalakeIssueReportItem) {
 	defer func() { _ = file.Close() }()
 	writer = csv.NewWriter(file)
 	defer writer.Flush()
-	fatalError(writer.Write([]string{"ES Document Id", "Identity Id", "Datasource", "Insights Project Slug", "Created At", "Type", "Filtered"}))
+	fatalError(writer.Write([]string{"ES Document Id", "Identity Id", "Datasource", "Insights Project Slug", "Salesforce Project Slug", "Created At", "Type", "Filtered"}))
 	for _, row := range rows {
 		fatalError(writer.Write(row))
 	}
@@ -1972,6 +2012,7 @@ func saveDatalakeDocsReport(report []datalakeDocReportItem) {
 			item.identityID,
 			item.dataSource,
 			item.projectSlug,
+			item.sfSlug,
 			toYMDHMSDate(item.createdAt),
 			toDocType(item.actionType),
 			filtered,
@@ -1981,7 +2022,7 @@ func saveDatalakeDocsReport(report []datalakeDocReportItem) {
 	sort.Slice(
 		rows,
 		func(i, j int) bool {
-			return rows[i][4] > rows[j][4]
+			return rows[i][5] > rows[j][5]
 		},
 	)
 	var writer *csv.Writer
@@ -1990,7 +2031,7 @@ func saveDatalakeDocsReport(report []datalakeDocReportItem) {
 	defer func() { _ = file.Close() }()
 	writer = csv.NewWriter(file)
 	defer writer.Flush()
-	fatalError(writer.Write([]string{"ES Document Id", "Identity Id", "Datasource", "Insights Project Slug", "Created At", "Type", "Filtered"}))
+	fatalError(writer.Write([]string{"ES Document Id", "Identity Id", "Datasource", "Insights Project Slug", "Salesforce Project Slug", "Created At", "Type", "Filtered"}))
 	for _, row := range rows {
 		fatalError(writer.Write(row))
 	}
@@ -2302,6 +2343,9 @@ func setupEnvs() {
 		}
 	}
 	gNamePrefix = os.Getenv("NAME_PREFIX")
+	if gNamePrefix != "" && !strings.HasSuffix(gNamePrefix, "_") {
+		gNamePrefix += "_"
+	}
 	sMaxThreads := os.Getenv("MAX_THREADS")
 	if sMaxThreads != "" {
 		gMaxThreads, err := strconv.Atoi(sMaxThreads)
