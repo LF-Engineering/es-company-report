@@ -199,10 +199,12 @@ func getIndices(res map[string]interface{}, aliases bool) (indices []string) {
 			continue
 		}
 		// to limit data processing while implementing
-		// xxx
-		if !strings.Contains(idx, "finos") {
-			continue
-		}
+		// yyy
+		/*
+			if !strings.Contains(idx, "finos") {
+				continue
+			}
+		*/
 		if !aliases {
 			sCnt, _ := item["docs.count"].(string)
 			cnt, _ := strconv.Atoi(sCnt)
