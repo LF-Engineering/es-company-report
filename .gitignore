@@ -15,8 +15,8 @@
 # vendor/
 
 /report
-/*.secret
-/*.swp
-/*.csv
-/*.log
+*.secret
+*.swp
+*.csv
+*.log
 out

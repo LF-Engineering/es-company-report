@@ -33,6 +33,8 @@ var (
 	gSubReport  map[string]struct{}
 	gAll        map[string]struct{}
 	gDt         time.Time
+	gNamePrefix string
+	gMaxThreads int
 )
 
 var gDtMtx = &sync.Mutex{}
@@ -1636,8 +1638,8 @@ func enrichOrgReport(report *contribReport) {
 	}(shCh)
 	// Enrich other per-author metrics
 	thrN := runtime.NumCPU()
-	if thrN > 12 {
-		thrN = 12
+	if gMaxThreads > 0 && thrN > gMaxThreads {
+		thrN = gMaxThreads
 	}
 	ch := make(chan struct{})
 	nThreads := 0
@@ -1722,7 +1724,7 @@ func saveOrgReport(report []contribReportItem) {
 		},
 	)
 	var writer *csv.Writer
-	file, err := os.Create("report.csv")
+	file, err := os.Create(gNamePrefix + "report.csv")
 	fatalError(err)
 	defer func() { _ = file.Close() }()
 	writer = csv.NewWriter(file)
@@ -1767,7 +1769,7 @@ func saveSummaryOrgReport(report map[string]contribReportItem) {
 		},
 	)
 	var writer *csv.Writer
-	file, err := os.Create("summary.csv")
+	file, err := os.Create(gNamePrefix + "summary.csv")
 	fatalError(err)
 	defer func() { _ = file.Close() }()
 	writer = csv.NewWriter(file)
@@ -1805,7 +1807,7 @@ func saveDatalakeLOCReport(report []datalakeLOCReportItem) {
 		},
 	)
 	var writer *csv.Writer
-	file, err := os.Create("datalake_loc.csv")
+	file, err := os.Create(gNamePrefix + "datalake_loc.csv")
 	fatalError(err)
 	defer func() { _ = file.Close() }()
 	writer = csv.NewWriter(file)
@@ -1899,7 +1901,7 @@ func saveDatalakePRsReport(report []datalakePRReportItem) {
 		},
 	)
 	var writer *csv.Writer
-	file, err := os.Create("datalake_prs.csv")
+	file, err := os.Create(gNamePrefix + "datalake_prs.csv")
 	fatalError(err)
 	defer func() { _ = file.Close() }()
 	writer = csv.NewWriter(file)
@@ -1936,7 +1938,7 @@ func saveDatalakeIssuesReport(report []datalakeIssueReportItem) {
 		},
 	)
 	var writer *csv.Writer
-	file, err := os.Create("datalake_issues.csv")
+	file, err := os.Create(gNamePrefix + "datalake_issues.csv")
 	fatalError(err)
 	defer func() { _ = file.Close() }()
 	writer = csv.NewWriter(file)
@@ -1988,7 +1990,7 @@ func saveDatalakeDocsReport(report []datalakeDocReportItem) {
 		},
 	)
 	var writer *csv.Writer
-	file, err := os.Create("datalake_docs.csv")
+	file, err := os.Create(gNamePrefix + "datalake_docs.csv")
 	fatalError(err)
 	defer func() { _ = file.Close() }()
 	writer = csv.NewWriter(file)
@@ -2001,13 +2003,13 @@ func saveDatalakeDocsReport(report []datalakeDocReportItem) {
 
 func genOrgReport(roots, dataSourceTypes []string) {
 	thrN := runtime.NumCPU()
+	if gMaxThreads > 0 && thrN > gMaxThreads {
+		thrN = gMaxThreads
+	}
 	// thrN = 1
 	// if len(roots) > 20 {
 	//	 roots = roots[:20]
 	// }
-	if thrN > 20 {
-		thrN = 20
-	}
 	runtime.GOMAXPROCS(thrN)
 	ch := make(chan []contribReportItem)
 	report := contribReport{}
@@ -2201,13 +2203,13 @@ func genDatalakeReport(roots, dataSourceTypes []string) {
 		fmt.Printf("Datalake report for projects %+v\n", roots)
 	}
 	thrN := runtime.NumCPU()
+	if gMaxThreads > 0 && thrN > gMaxThreads {
+		thrN = gMaxThreads
+	}
 	// thrN = 1
 	// if len(roots) > 20 {
 	//	 roots = roots[:20]
 	// }
-	if thrN > 20 {
-		thrN = 20
-	}
 	runtime.GOMAXPROCS(thrN)
 	chIdentIDs := make(chan map[string]struct{})
 	go getAffiliatedNonBotIdentities(chIdentIDs)
@@ -2296,6 +2298,23 @@ func setupEnvs() {
 	if gESURL == "" {
 		fatal("ES_URL must be set")
 	}
+	sDSes := strings.TrimSpace(os.Getenv("DATASOURCES"))
+	if sDSes != "" {
+		ary := strings.Split(sDSes, ",")
+		gDatasource = make(map[string]struct{})
+		for _, ds := range ary {
+			gDatasource[strings.TrimSpace(ds)] = struct{}{}
+		}
+	}
+	gNamePrefix = os.Getenv("NAME_PREFIX")
+	sMaxThreads := os.Getenv("MAX_THREADS")
+	if sMaxThreads != "" {
+		gMaxThreads, err := strconv.Atoi(sMaxThreads)
+		fatalError(err)
+		if gMaxThreads < 0 {
+			gMaxThreads = 0
+		}
+	}
 	switch gReport {
 	case "org":
 		gOrg = os.Getenv("ORG")
@@ -2324,14 +2343,6 @@ func setupEnvs() {
 		}
 	default:
 		fatal("unknown report type: " + gReport)
-	}
-	sDSes := strings.TrimSpace(os.Getenv("DATASOURCES"))
-	if sDSes != "" {
-		ary := strings.Split(sDSes, ",")
-		gDatasource = make(map[string]struct{})
-		for _, ds := range ary {
-			gDatasource[strings.TrimSpace(ds)] = struct{}{}
-		}
 	}
 	gAll = make(map[string]struct{})
 	gDt = time.Now()
