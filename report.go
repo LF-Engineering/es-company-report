@@ -37,7 +37,7 @@ var (
 	gDbg        bool
 	gDatasource map[string]struct{}
 	gSubReport  map[string]struct{}
-	gAll        map[string]struct{}
+	gAll        map[string]int
 	gDt         time.Time
 	gNamePrefix string
 	gMaxThreads int
@@ -186,7 +186,7 @@ func reportThisErrorOrg(err resultTypeError) bool {
 	return true
 }
 
-func getIndices(res map[string]interface{}) (indices []string) {
+func getIndices(res map[string]interface{}, aliases bool) (indices []string) {
 	ary, _ := res["x"].([]interface{})
 	for _, i := range ary {
 		item, _ := i.(map[string]interface{})
@@ -194,20 +194,47 @@ func getIndices(res map[string]interface{}) (indices []string) {
 		if !strings.HasPrefix(idx, "sds-") {
 			continue
 		}
-		if strings.HasSuffix(idx, "-raw") || strings.HasSuffix(idx, "-for-merge") || strings.HasSuffix(idx, "-cache") || strings.HasSuffix(idx, "-converted") || strings.HasSuffix(idx, "-temp") || strings.HasSuffix(idx, "-last-action-date-cache") {
+		// if strings.HasSuffix(idx, "-raw") || strings.HasSuffix(idx, "-for-merge") || strings.HasSuffix(idx, "-cache") || strings.HasSuffix(idx, "-converted") || strings.HasSuffix(idx, "-temp") || strings.HasSuffix(idx, "-last-action-date-cache") {
+		if strings.HasSuffix(idx, "-raw") || strings.HasSuffix(idx, "-cache") || strings.HasSuffix(idx, "-converted") || strings.HasSuffix(idx, "-temp") || strings.HasSuffix(idx, "-last-action-date-cache") {
 			continue
 		}
 		// to limit data processing while implementing
 		// xxx
-		if !strings.Contains(idx, "jira") {
+		if !strings.Contains(idx, "finos") {
 			continue
 		}
+		if !aliases {
+			sCnt, _ := item["docs.count"].(string)
+			cnt, _ := strconv.Atoi(sCnt)
+			if gDbg {
+				fmt.Printf("%s-> %d\n", idx, cnt)
+			}
+			if cnt == 0 {
+				gAll[idx] = 0
+				fmt.Printf("skipping an empty index %s\n", idx)
+				continue
+			}
+			indices = append(indices, idx)
+			gAll[idx] = cnt
+			continue
+		}
+		cnt, ok := gAll[idx]
+		if ok && cnt == 0 {
+			fmt.Printf("skipping an empty index from alias %s\n", idx)
+			continue
+		}
+		if !ok {
+			gAll[idx] = -1
+		}
 		indices = append(indices, idx)
-		gAll[idx] = struct{}{}
 	}
 	sort.Strings(indices)
 	if gDbg {
-		fmt.Printf("indices: %v\n", indices)
+		if aliases {
+			fmt.Printf("indices from aliases: %v\n", indices)
+		} else {
+			fmt.Printf("indices: %v\n", indices)
+		}
 	}
 	return
 }
@@ -221,6 +248,9 @@ func getRoots(indices, aliases []string) (roots, dsa []string) {
 		reported = make(map[string]struct{})
 	}
 	for _, idx := range indices {
+		if strings.HasSuffix(idx, "-for-merge") {
+			idx = idx[:len(idx)-10]
+		}
 		ary := strings.Split(idx, "-")
 		lAry := len(ary)
 		ds := ary[lAry-1]
@@ -256,6 +286,9 @@ func getRoots(indices, aliases []string) (roots, dsa []string) {
 		all[root] = struct{}{}
 	}
 	for _, idx := range aliases {
+		if strings.HasSuffix(idx, "-for-merge") {
+			idx = idx[:len(idx)-10]
+		}
 		ary := strings.Split(idx, "-")
 		lAry := len(ary)
 		ds := ary[lAry-1]
@@ -324,7 +357,7 @@ func getSlugRoots() (slugRoots, dataSourceTypes []string) {
 	var result map[string]interface{}
 	err = jsoniter.Unmarshal(body, &result)
 	fatalError(err)
-	indices := getIndices(result)
+	indices := getIndices(result, false)
 	url = gESURL + "/_cat/aliases?format=json"
 	req, err = http.NewRequest(method, url, nil)
 	fatalError(err)
@@ -337,7 +370,7 @@ func getSlugRoots() (slugRoots, dataSourceTypes []string) {
 	body = append(body, []byte(`}`)...)
 	err = jsoniter.Unmarshal(body, &result)
 	fatalError(err)
-	aliases := getIndices(result)
+	aliases := getIndices(result, true)
 	slugRoots, dataSourceTypes = getRoots(indices, aliases)
 	return
 }
@@ -486,6 +519,9 @@ func datalakeLOCReportForRoot(root, projectSlug, sfSlug string, overrideProjectS
 			10000,
 		)
 	}
+	if gDbg {
+		fmt.Printf("%s:%s\n", pattern, data)
+	}
 	payloadBytes := []byte(data)
 	payloadBody := bytes.NewReader(payloadBytes)
 	url := gESURL + "/_sql?format=json"
@@ -631,6 +667,9 @@ func datalakeGithubPRReportForRoot(root, projectSlug, sfName string, overridePro
 			pattern,
 			10000,
 		)
+	}
+	if gDbg {
+		fmt.Printf("%s:%s\n", pattern, data)
 	}
 	payloadBytes := []byte(data)
 	payloadBody := bytes.NewReader(payloadBytes)
@@ -794,6 +833,9 @@ func datalakeGerritReviewReportForRoot(root, projectSlug, sfName string, overrid
 			10000,
 		)
 	}
+	if gDbg {
+		fmt.Printf("%s:%s\n", pattern, data)
+	}
 	payloadBytes := []byte(data)
 	payloadBody := bytes.NewReader(payloadBytes)
 	url := gESURL + "/_sql?format=json"
@@ -948,6 +990,9 @@ func datalakeGithubIssueReportForRoot(root, projectSlug, sfName string, override
 			10000,
 		)
 	}
+	if gDbg {
+		fmt.Printf("%s:%s\n", pattern, data)
+	}
 	payloadBytes := []byte(data)
 	payloadBody := bytes.NewReader(payloadBytes)
 	url := gESURL + "/_sql?format=json"
@@ -1092,6 +1137,9 @@ func datalakeJiraIssueReportForRoot(root, projectSlug, sfName string, overridePr
 			10000,
 		)
 	}
+	if gDbg {
+		fmt.Printf("%s:%s\n", pattern, data)
+	}
 	payloadBytes := []byte(data)
 	payloadBody := bytes.NewReader(payloadBytes)
 	url := gESURL + "/_sql?format=json"
@@ -1230,6 +1278,9 @@ func datalakeBugzillaIssueReportForRoot(root, projectSlug, sfName string, overri
 		pattern,
 		10000,
 	)
+	if gDbg {
+		fmt.Printf("%s:%s\n", pattern, data)
+	}
 	payloadBytes := []byte(data)
 	payloadBody := bytes.NewReader(payloadBytes)
 	url := gESURL + "/_sql?format=json"
@@ -1346,6 +1397,14 @@ func datalakeDocReportForRoot(root, projectSlug, sfName string, overrideProjectS
 	method := "POST"
 	var data string
 	if missingCol {
+		data = fmt.Sprintf(
+			`{"query":"select uuid, author_id, '%s', %s, type from \"%s\" `+
+				`where author_id is not null","fetch_size":%d}`,
+			projectSlug,
+			cCreatedAtColumn,
+			pattern,
+			10000,
+		)
 	} else {
 		data = fmt.Sprintf(
 			`{"query":"select uuid, author_id, project_slug, %s, type from \"%s\" `+
@@ -1354,6 +1413,9 @@ func datalakeDocReportForRoot(root, projectSlug, sfName string, overrideProjectS
 			pattern,
 			10000,
 		)
+	}
+	if gDbg {
+		fmt.Printf("%s:%s\n", pattern, data)
 	}
 	payloadBytes := []byte(data)
 	payloadBody := bytes.NewReader(payloadBytes)
@@ -2611,7 +2673,7 @@ func setupEnvs() {
 	default:
 		fatal("unknown report type: " + gReport)
 	}
-	gAll = make(map[string]struct{})
+	gAll = make(map[string]int)
 	gDt = time.Now()
 }
 
