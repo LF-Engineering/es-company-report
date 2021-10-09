@@ -2389,7 +2389,7 @@ func dedupDatalakeReport(report *datalakeReport, bLOC, bDocs, bPRs, bIssues bool
 			}
 		}
 		if len(locItems) != len(report.locItems) {
-			fmt.Printf("LOC data dedup: %d -> %d\n", len(report.locItems), len(locItems))
+			fmt.Printf("LOC data dedup: %d -> %d (%.2f%%)\n", len(report.locItems), len(locItems), (float64(len(locItems))*100.0)/float64(len(report.locItems)))
 			report.locItems = locItems
 		} else {
 			fmt.Printf("no duplicate elements found, LOC items: %d\n", len(report.locItems))
@@ -2406,7 +2406,7 @@ func dedupDatalakeReport(report *datalakeReport, bLOC, bDocs, bPRs, bIssues bool
 			}
 		}
 		if len(docItems) != len(report.docItems) {
-			fmt.Printf("Docs data dedup: %d -> %d\n", len(report.docItems), len(docItems))
+			fmt.Printf("Docs data dedup: %d -> %d (%.2f%%)\n", len(report.docItems), len(docItems), (float64(len(docItems))*100.0)/float64(len(report.docItems)))
 			report.docItems = docItems
 		} else {
 			fmt.Printf("no duplicate elements found, docs items: %d\n", len(report.docItems))
@@ -2423,7 +2423,7 @@ func dedupDatalakeReport(report *datalakeReport, bLOC, bDocs, bPRs, bIssues bool
 			}
 		}
 		if len(prItems) != len(report.prItems) {
-			fmt.Printf("PR data dedup: %d -> %d\n", len(report.prItems), len(prItems))
+			fmt.Printf("PR data dedup: %d -> %d (%.2f%%)\n", len(report.prItems), len(prItems), (float64(len(prItems))*100.0)/float64(len(report.prItems)))
 			report.prItems = prItems
 		} else {
 			fmt.Printf("no duplicate elements found, PR items: %d\n", len(report.prItems))
@@ -2440,7 +2440,7 @@ func dedupDatalakeReport(report *datalakeReport, bLOC, bDocs, bPRs, bIssues bool
 			}
 		}
 		if len(issueItems) != len(report.issueItems) {
-			fmt.Printf("Issue data dedup: %d -> %d\n", len(report.issueItems), len(issueItems))
+			fmt.Printf("Issue data dedup: %d -> %d (%.2f%%)\n", len(report.issueItems), len(issueItems), (float64(len(issueItems))*100.0)/float64(len(report.issueItems)))
 			report.issueItems = issueItems
 		} else {
 			fmt.Printf("no duplicate elements found, issue items: %d\n", len(report.issueItems))
@@ -2460,7 +2460,7 @@ func filterDatalakeReport(report *datalakeReport, identityIDs map[string]struct{
 			}
 		}
 		if locFiltered > 0 {
-			fmt.Printf("filtered %d/%d loc items\n", locFiltered, len(report.locItems))
+			fmt.Printf("filtered %d/%d loc items (%.2f%%)\n", locFiltered, len(report.locItems), (float64(locFiltered)*100.0)/float64(len(report.locItems)))
 		} else {
 			fmt.Printf("all %d LOC items also present in SH DB loc items\n", len(report.locItems))
 		}
@@ -2475,7 +2475,7 @@ func filterDatalakeReport(report *datalakeReport, identityIDs map[string]struct{
 			}
 		}
 		if docFiltered > 0 {
-			fmt.Printf("filtered %d/%d docs items\n", docFiltered, len(report.docItems))
+			fmt.Printf("filtered %d/%d docs items (%.2f%%)\n", docFiltered, len(report.docItems), (float64(docFiltered)*100.0)/float64(len(report.docItems)))
 		} else {
 			fmt.Printf("all %d docs items also present in SH DB doc items\n", len(report.docItems))
 		}
@@ -2490,7 +2490,7 @@ func filterDatalakeReport(report *datalakeReport, identityIDs map[string]struct{
 			}
 		}
 		if prFiltered > 0 {
-			fmt.Printf("filtered %d/%d PR items\n", prFiltered, len(report.prItems))
+			fmt.Printf("filtered %d/%d PR items (%.2f%%)\n", prFiltered, len(report.prItems), (float64(prFiltered)*100.0)/float64(len(report.prItems)))
 		} else {
 			fmt.Printf("all %d PRs items also present in SH DB PR items\n", len(report.prItems))
 		}
@@ -2505,7 +2505,7 @@ func filterDatalakeReport(report *datalakeReport, identityIDs map[string]struct{
 			}
 		}
 		if issueFiltered > 0 {
-			fmt.Printf("filtered %d/%d issue items\n", issueFiltered, len(report.issueItems))
+			fmt.Printf("filtered %d/%d issue items (%.2f%%)\n", issueFiltered, len(report.issueItems), (float64(issueFiltered)*100.0)/float64(len(report.issueItems)))
 		} else {
 			fmt.Printf("all %d issues items also present in SH DB issue items\n", len(report.issueItems))
 		}
