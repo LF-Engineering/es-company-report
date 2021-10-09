@@ -70,6 +70,7 @@ type datalakeLOCReportItem struct {
 	identityID  string
 	dataSource  string
 	projectSlug string
+	sfSlug      string
 	createdAt   time.Time
 	locAdded    int
 	locDeleted  int
@@ -83,6 +84,7 @@ type datalakeDocReportItem struct {
 	identityID  string
 	dataSource  string
 	projectSlug string
+	sfSlug      string
 	createdAt   time.Time
 	actionType  string // page, new_page, comment, attachment
 	filtered    bool
@@ -95,6 +97,7 @@ type datalakePRReportItem struct {
 	identityID  string
 	dataSource  string
 	projectSlug string
+	sfSlug      string
 	createdAt   time.Time
 	actionType  string // all possible doc types from github-issue (PRs only) and gerrit, also detecting approvals/rejections/merges
 	filtered    bool
@@ -107,6 +110,7 @@ type datalakeIssueReportItem struct {
 	identityID  string
 	dataSource  string
 	projectSlug string
+	sfSlug      string
 	createdAt   time.Time
 	actionType  string // all possible doc types from github-issue (Issue only), Jira & Bugzilla(rest)
 	filtered    bool
@@ -121,6 +125,17 @@ type datalakeReport struct {
 	issueItems []datalakeIssueReportItem
 }
 
+type resultTypeError struct {
+	Type   string `json:"type"`
+	Reason string `json:"reason"`
+}
+
+type resultType struct {
+	Cursor string          `json:"cursor"`
+	Rows   [][]interface{} `json:"rows"`
+	Error  resultTypeError `json:"error"`
+}
+
 func fatalError(err error) {
 	if err == nil {
 		return
@@ -132,6 +147,10 @@ func fatalError(err error) {
 func fatal(str string) {
 	fmt.Printf("error: %s\n", str)
 	panic("")
+}
+
+func reportThisError(err resultTypeError) bool {
+	return !strings.Contains(fmt.Sprintf("%+v", err), "Unknown index ")
 }
 
 func getIndices(res map[string]interface{}) (indices []string) {
@@ -320,17 +339,39 @@ func toYMDHMSDate(dt time.Time) string {
 	return fmt.Sprintf("%04d-%02d-%02d %02d:%02d:%02d", dt.Year(), dt.Month(), dt.Day(), dt.Hour(), dt.Minute(), dt.Second())
 }
 
-func applySlugMapping(slug string) (daName, sfName string, found bool) {
+func applySlugMapping(slug string, useDAWhenNotFound bool) (daName, sfName string, found bool) {
 	slugs := []string{slug}
-	if gDbg {
-		defer func() {
+	defer func() {
+		if gDbg {
 			fmt.Printf("slug mapping: %s -> %+v -> %s,%s,%v\n", slug, slugs, daName, sfName, found)
-		}()
-	}
+			return
+		}
+		if !found {
+			fmt.Printf("slug mapping not found: %s -> %+v -> %s,%s", slug, slugs, daName, sfName)
+		}
+	}()
 	ary := strings.Split(slug, "-")
 	n := len(ary)
 	for i := 1; i < n; i++ {
 		slugs = append(slugs, strings.Join(ary[:i], "-")+"/"+strings.Join(ary[i:], "-"))
+	}
+	if strings.HasSuffix(slug, "-shared") {
+		newSlug := slug[:len(slug)-7]
+		fmt.Printf("shared slug detected: '%s' -> '%s'\n", slug, newSlug)
+		ary := strings.Split(newSlug, "-")
+		n := len(ary)
+		for i := 1; i < n; i++ {
+			slugs = append(slugs, strings.Join(ary[:i], "-")+"/"+strings.Join(ary[i:], "-"))
+		}
+	}
+	if strings.HasSuffix(slug, "-f") {
+		newSlug := slug[:len(slug)-2]
+		fmt.Printf("dash-f slug detected: '%s' -> '%s'\n", slug, newSlug)
+		ary := strings.Split(newSlug, "-")
+		n := len(ary)
+		for i := 1; i < n; i++ {
+			slugs = append(slugs, strings.Join(ary[:i], "-")+"/"+strings.Join(ary[i:], "-"))
+		}
 	}
 	for _, slg := range slugs {
 		rows, err := gDB.Query("select sf_name from slug_mapping where da_name = ?", slg)
@@ -348,13 +389,15 @@ func applySlugMapping(slug string) (daName, sfName string, found bool) {
 			return
 		}
 	}
-	sfName = slug
+	if useDAWhenNotFound {
+		sfName = slug
+	}
 	daName = slug
 	return
 }
 
 // subrep
-func datalakeLOCReportForRoot(root, projectSlug string, overrideProjectSlug bool) (locItems []datalakeLOCReportItem) {
+func datalakeLOCReportForRoot(root, projectSlug, sfSlug string, overrideProjectSlug bool) (locItems []datalakeLOCReportItem) {
 	if gDbg {
 		defer func() {
 			fmt.Printf("got LOC %s: %v\n", root, locItems)
@@ -379,20 +422,12 @@ func datalakeLOCReportForRoot(root, projectSlug string, overrideProjectSlug bool
 	body, err := ioutil.ReadAll(resp.Body)
 	fatalError(err)
 	_ = resp.Body.Close()
-	type resultType struct {
-		Cursor string          `json:"cursor"`
-		Rows   [][]interface{} `json:"rows"`
-		Error  struct {
-			Type   string `json:"type"`
-			Reason string `json:"reason"`
-		} `json:"error"`
-	}
 	var result resultType
 	err = jsoniter.Unmarshal(body, &result)
 	fatalError(err)
 	if result.Error.Type != "" || result.Error.Reason != "" {
-		// Error in this case is allowed
-		if gDbg {
+		// Missing index error in this case is allowed
+		if gDbg || reportThisError(result.Error) {
 			fmt.Printf("datalakeLOCReportForRoot: error for %s: %v\n", pattern, result.Error)
 		}
 		return
@@ -431,6 +466,7 @@ func datalakeLOCReportForRoot(root, projectSlug string, overrideProjectSlug bool
 		}
 	}
 	processResults()
+	page := 1
 	for {
 		if result.Cursor == "" {
 			break
@@ -455,6 +491,8 @@ func datalakeLOCReportForRoot(root, projectSlug string, overrideProjectSlug bool
 		if len(result.Rows) == 0 {
 			break
 		}
+		page++
+		fmt.Printf("%s: processing #%d page...\n", pattern, page)
 		processResults()
 	}
 	if result.Cursor == "" {
@@ -476,7 +514,7 @@ func datalakeLOCReportForRoot(root, projectSlug string, overrideProjectSlug bool
 }
 
 // subrep
-func datalakeGithubPRReportForRoot(root, projectSlug string, overrideProjectSlug bool) (prItems []datalakePRReportItem) {
+func datalakeGithubPRReportForRoot(root, projectSlug, sfName string, overrideProjectSlug bool) (prItems []datalakePRReportItem) {
 	if gDbg {
 		defer func() {
 			fmt.Printf("got github-pr %s: %v\n", root, prItems)
@@ -501,20 +539,12 @@ func datalakeGithubPRReportForRoot(root, projectSlug string, overrideProjectSlug
 	body, err := ioutil.ReadAll(resp.Body)
 	fatalError(err)
 	_ = resp.Body.Close()
-	type resultType struct {
-		Cursor string          `json:"cursor"`
-		Rows   [][]interface{} `json:"rows"`
-		Error  struct {
-			Type   string `json:"type"`
-			Reason string `json:"reason"`
-		} `json:"error"`
-	}
 	var result resultType
 	err = jsoniter.Unmarshal(body, &result)
 	fatalError(err)
 	if result.Error.Type != "" || result.Error.Reason != "" {
-		// Error in this case is allowed
-		if gDbg {
+		// Missing index error in this case is allowed
+		if gDbg || reportThisError(result.Error) {
 			fmt.Printf("datalakeGitHubPRReportForRoot: error for %s: %v\n", pattern, result.Error)
 		}
 		return
@@ -569,6 +599,7 @@ func datalakeGithubPRReportForRoot(root, projectSlug string, overrideProjectSlug
 		}
 	}
 	processResults()
+	page := 1
 	for {
 		if result.Cursor == "" {
 			break
@@ -593,6 +624,8 @@ func datalakeGithubPRReportForRoot(root, projectSlug string, overrideProjectSlug
 		if len(result.Rows) == 0 {
 			break
 		}
+		page++
+		fmt.Printf("%s: processing #%d page...\n", pattern, page)
 		processResults()
 	}
 	if result.Cursor == "" {
@@ -614,7 +647,7 @@ func datalakeGithubPRReportForRoot(root, projectSlug string, overrideProjectSlug
 }
 
 // subrep
-func datalakeGerritReviewReportForRoot(root, projectSlug string, overrideProjectSlug bool) (prItems []datalakePRReportItem) {
+func datalakeGerritReviewReportForRoot(root, projectSlug, sfName string, overrideProjectSlug bool) (prItems []datalakePRReportItem) {
 	if gDbg {
 		defer func() {
 			fmt.Printf("got gerrit-review %s: %v\n", root, prItems)
@@ -639,20 +672,12 @@ func datalakeGerritReviewReportForRoot(root, projectSlug string, overrideProject
 	body, err := ioutil.ReadAll(resp.Body)
 	fatalError(err)
 	_ = resp.Body.Close()
-	type resultType struct {
-		Cursor string          `json:"cursor"`
-		Rows   [][]interface{} `json:"rows"`
-		Error  struct {
-			Type   string `json:"type"`
-			Reason string `json:"reason"`
-		} `json:"error"`
-	}
 	var result resultType
 	err = jsoniter.Unmarshal(body, &result)
 	fatalError(err)
 	if result.Error.Type != "" || result.Error.Reason != "" {
-		// Error in this case is allowed
-		if gDbg {
+		// Missing index error in this case is allowed
+		if gDbg || reportThisError(result.Error) {
 			fmt.Printf("datalakeGerritReviewReportForRoot: error for %s: %v\n", pattern, result.Error)
 		}
 		return
@@ -699,6 +724,7 @@ func datalakeGerritReviewReportForRoot(root, projectSlug string, overrideProject
 		}
 	}
 	processResults()
+	page := 1
 	for {
 		if result.Cursor == "" {
 			break
@@ -723,6 +749,8 @@ func datalakeGerritReviewReportForRoot(root, projectSlug string, overrideProject
 		if len(result.Rows) == 0 {
 			break
 		}
+		page++
+		fmt.Printf("%s: processing #%d page...\n", pattern, page)
 		processResults()
 	}
 	if result.Cursor == "" {
@@ -744,7 +772,7 @@ func datalakeGerritReviewReportForRoot(root, projectSlug string, overrideProject
 }
 
 // subrep
-func datalakeGithubIssueReportForRoot(root, projectSlug string, overrideProjectSlug bool) (issueItems []datalakeIssueReportItem) {
+func datalakeGithubIssueReportForRoot(root, projectSlug, sfName string, overrideProjectSlug bool) (issueItems []datalakeIssueReportItem) {
 	if gDbg {
 		defer func() {
 			fmt.Printf("got github-issue %s: %v\n", root, issueItems)
@@ -769,20 +797,12 @@ func datalakeGithubIssueReportForRoot(root, projectSlug string, overrideProjectS
 	body, err := ioutil.ReadAll(resp.Body)
 	fatalError(err)
 	_ = resp.Body.Close()
-	type resultType struct {
-		Cursor string          `json:"cursor"`
-		Rows   [][]interface{} `json:"rows"`
-		Error  struct {
-			Type   string `json:"type"`
-			Reason string `json:"reason"`
-		} `json:"error"`
-	}
 	var result resultType
 	err = jsoniter.Unmarshal(body, &result)
 	fatalError(err)
 	if result.Error.Type != "" || result.Error.Reason != "" {
-		// Error in this case is allowed
-		if gDbg {
+		// Missing index error in this case is allowed
+		if gDbg || reportThisError(result.Error) {
 			fmt.Printf("datalakeGitHubIssueReportForRoot: error for %s: %v\n", pattern, result.Error)
 		}
 		return
@@ -818,6 +838,7 @@ func datalakeGithubIssueReportForRoot(root, projectSlug string, overrideProjectS
 		}
 	}
 	processResults()
+	page := 1
 	for {
 		if result.Cursor == "" {
 			break
@@ -842,6 +863,8 @@ func datalakeGithubIssueReportForRoot(root, projectSlug string, overrideProjectS
 		if len(result.Rows) == 0 {
 			break
 		}
+		page++
+		fmt.Printf("%s: processing #%d page...\n", pattern, page)
 		processResults()
 	}
 	if result.Cursor == "" {
@@ -863,7 +886,7 @@ func datalakeGithubIssueReportForRoot(root, projectSlug string, overrideProjectS
 }
 
 // subrep
-func datalakeJiraIssueReportForRoot(root, projectSlug string, overrideProjectSlug bool) (issueItems []datalakeIssueReportItem) {
+func datalakeJiraIssueReportForRoot(root, projectSlug, sfName string, overrideProjectSlug bool) (issueItems []datalakeIssueReportItem) {
 	if gDbg {
 		defer func() {
 			fmt.Printf("got jira issue %s: %v\n", root, issueItems)
@@ -889,20 +912,12 @@ func datalakeJiraIssueReportForRoot(root, projectSlug string, overrideProjectSlu
 	body, err := ioutil.ReadAll(resp.Body)
 	fatalError(err)
 	_ = resp.Body.Close()
-	type resultType struct {
-		Cursor string          `json:"cursor"`
-		Rows   [][]interface{} `json:"rows"`
-		Error  struct {
-			Type   string `json:"type"`
-			Reason string `json:"reason"`
-		} `json:"error"`
-	}
 	var result resultType
 	err = jsoniter.Unmarshal(body, &result)
 	fatalError(err)
 	if result.Error.Type != "" || result.Error.Reason != "" {
-		// Error in this case is allowed
-		if gDbg {
+		// Missing index error in this case is allowed
+		if gDbg || reportThisError(result.Error) {
 			fmt.Printf("datalakeJiraIssueReportForRoot: error for %s: %v\n", pattern, result.Error)
 		}
 		return
@@ -939,6 +954,7 @@ func datalakeJiraIssueReportForRoot(root, projectSlug string, overrideProjectSlu
 		}
 	}
 	processResults()
+	page := 1
 	for {
 		if result.Cursor == "" {
 			break
@@ -963,6 +979,8 @@ func datalakeJiraIssueReportForRoot(root, projectSlug string, overrideProjectSlu
 		if len(result.Rows) == 0 {
 			break
 		}
+		page++
+		fmt.Printf("%s: processing #%d page...\n", pattern, page)
 		processResults()
 	}
 	if result.Cursor == "" {
@@ -984,7 +1002,7 @@ func datalakeJiraIssueReportForRoot(root, projectSlug string, overrideProjectSlu
 }
 
 // subrep
-func datalakeBugzillaIssueReportForRoot(root, projectSlug string, overrideProjectSlug, rest bool) (issueItems []datalakeIssueReportItem) {
+func datalakeBugzillaIssueReportForRoot(root, projectSlug, sfName string, overrideProjectSlug, rest bool) (issueItems []datalakeIssueReportItem) {
 	ds := "bugzilla"
 	if rest {
 		ds += "rest"
@@ -1015,20 +1033,12 @@ func datalakeBugzillaIssueReportForRoot(root, projectSlug string, overrideProjec
 	body, err := ioutil.ReadAll(resp.Body)
 	fatalError(err)
 	_ = resp.Body.Close()
-	type resultType struct {
-		Cursor string          `json:"cursor"`
-		Rows   [][]interface{} `json:"rows"`
-		Error  struct {
-			Type   string `json:"type"`
-			Reason string `json:"reason"`
-		} `json:"error"`
-	}
 	var result resultType
 	err = jsoniter.Unmarshal(body, &result)
 	fatalError(err)
 	if result.Error.Type != "" || result.Error.Reason != "" {
-		// Error in this case is allowed
-		if gDbg {
+		// Missing index error in this case is allowed
+		if gDbg || reportThisError(result.Error) {
 			fmt.Printf("datalakeBugzillaIssueReportForRoot: error for %s: %v\n", pattern, result.Error)
 		}
 		return
@@ -1057,6 +1067,7 @@ func datalakeBugzillaIssueReportForRoot(root, projectSlug string, overrideProjec
 		}
 	}
 	processResults()
+	page := 1
 	for {
 		if result.Cursor == "" {
 			break
@@ -1081,6 +1092,8 @@ func datalakeBugzillaIssueReportForRoot(root, projectSlug string, overrideProjec
 		if len(result.Rows) == 0 {
 			break
 		}
+		page++
+		fmt.Printf("%s: processing #%d page...\n", pattern, page)
 		processResults()
 	}
 	if result.Cursor == "" {
@@ -1102,7 +1115,7 @@ func datalakeBugzillaIssueReportForRoot(root, projectSlug string, overrideProjec
 }
 
 // subrep
-func datalakeDocReportForRoot(root, projectSlug string, overrideProjectSlug bool) (docItems []datalakeDocReportItem) {
+func datalakeDocReportForRoot(root, projectSlug, sfName string, overrideProjectSlug bool) (docItems []datalakeDocReportItem) {
 	if gDbg {
 		defer func() {
 			fmt.Printf("got docs %s: %v\n", root, docItems)
@@ -1127,20 +1140,12 @@ func datalakeDocReportForRoot(root, projectSlug string, overrideProjectSlug bool
 	body, err := ioutil.ReadAll(resp.Body)
 	fatalError(err)
 	_ = resp.Body.Close()
-	type resultType struct {
-		Cursor string          `json:"cursor"`
-		Rows   [][]interface{} `json:"rows"`
-		Error  struct {
-			Type   string `json:"type"`
-			Reason string `json:"reason"`
-		} `json:"error"`
-	}
 	var result resultType
 	err = jsoniter.Unmarshal(body, &result)
 	fatalError(err)
 	if result.Error.Type != "" || result.Error.Reason != "" {
-		// Error in this case is allowed
-		if gDbg {
+		// Missing index error in this case is allowed
+		if gDbg || reportThisError(result.Error) {
 			fmt.Printf("datalakeDocReportForRoot: error for %s: %v\n", pattern, result.Error)
 		}
 		return
@@ -1175,6 +1180,7 @@ func datalakeDocReportForRoot(root, projectSlug string, overrideProjectSlug bool
 		}
 	}
 	processResults()
+	page := 1
 	for {
 		if result.Cursor == "" {
 			break
@@ -1199,6 +1205,8 @@ func datalakeDocReportForRoot(root, projectSlug string, overrideProjectSlug bool
 		if len(result.Rows) == 0 {
 			break
 		}
+		page++
+		fmt.Printf("%s: processing #%d page...\n", pattern, page)
 		processResults()
 	}
 	if result.Cursor == "" {
@@ -1233,34 +1241,34 @@ func datalakeReportForRoot(ch chan datalakeReport, msg, root string, dataSourceT
 		}
 		ch <- itemData
 	}()
-	daName, sfName, found := applySlugMapping(root)
+	daName, sfName, found := applySlugMapping(root, false)
 	if gDbg {
 		fmt.Printf("running for: %s %v -> %s,%s,%v\n", root, dataSourceTypes, daName, sfName, found)
 	}
 	if bLOC {
-		itemData.locItems = datalakeLOCReportForRoot(root, daName, found)
+		itemData.locItems = datalakeLOCReportForRoot(root, daName, sfName, found)
 	}
 	if bDocs {
-		itemData.docItems = datalakeDocReportForRoot(root, daName, found)
+		itemData.docItems = datalakeDocReportForRoot(root, daName, sfName, found)
 	}
 	if bPRs {
-		itemData.prItems = datalakeGithubPRReportForRoot(root, daName, found)
-		prItems := datalakeGerritReviewReportForRoot(root, daName, found)
+		itemData.prItems = datalakeGithubPRReportForRoot(root, daName, sfName, found)
+		prItems := datalakeGerritReviewReportForRoot(root, daName, sfName, found)
 		if len(prItems) > 0 {
 			itemData.prItems = append(itemData.prItems, prItems...)
 		}
 	}
 	if bIssues {
-		itemData.issueItems = datalakeGithubIssueReportForRoot(root, daName, found)
-		issueItems := datalakeJiraIssueReportForRoot(root, daName, found)
+		itemData.issueItems = datalakeGithubIssueReportForRoot(root, daName, sfName, found)
+		issueItems := datalakeJiraIssueReportForRoot(root, daName, sfName, found)
 		if len(issueItems) > 0 {
 			itemData.issueItems = append(itemData.issueItems, issueItems...)
 		}
-		issueItems = datalakeBugzillaIssueReportForRoot(root, daName, found, false)
+		issueItems = datalakeBugzillaIssueReportForRoot(root, daName, sfName, found, false)
 		if len(issueItems) > 0 {
 			itemData.issueItems = append(itemData.issueItems, issueItems...)
 		}
-		issueItems = datalakeBugzillaIssueReportForRoot(root, daName, found, true)
+		issueItems = datalakeBugzillaIssueReportForRoot(root, daName, sfName, found, true)
 		if len(issueItems) > 0 {
 			itemData.issueItems = append(itemData.issueItems, issueItems...)
 		}
@@ -1272,7 +1280,7 @@ func orgReportForRoot(ch chan []contribReportItem, root string) (items []contrib
 	defer func() {
 		ch <- items
 	}()
-	_, sfName, _ := applySlugMapping(root)
+	_, sfName, _ := applySlugMapping(root, true)
 	// fmt.Printf("running for: %s -> %s\n", root, sfName)
 	pattern := jsonEscape("sds-" + root + "-*,-*-raw,-*-for-merge,-*-cache,-*-converted,-*-temp,-*-last-action-date-cache")
 	method := "POST"
@@ -1296,20 +1304,12 @@ func orgReportForRoot(ch chan []contribReportItem, root string) (items []contrib
 	body, err := ioutil.ReadAll(resp.Body)
 	fatalError(err)
 	_ = resp.Body.Close()
-	type resultType struct {
-		Cursor string          `json:"cursor"`
-		Rows   [][]interface{} `json:"rows"`
-		Error  struct {
-			Type   string `json:"type"`
-			Reason string `json:"reason"`
-		} `json:"error"`
-	}
 	var result resultType
 	err = jsoniter.Unmarshal(body, &result)
 	fatalError(err)
 	if result.Error.Type != "" || result.Error.Reason != "" {
-		// Error in this case is allowed
-		if gDbg {
+		// Missing index error in this case is allowed
+		if gDbg || reportThisError(result.Error) {
 			fmt.Printf("error for %s: %v\n", pattern, result.Error)
 		}
 		return
@@ -1342,6 +1342,7 @@ func orgReportForRoot(ch chan []contribReportItem, root string) (items []contrib
 		}
 	}
 	processResults()
+	page := 1
 	for {
 		if result.Cursor == "" {
 			break
@@ -1366,6 +1367,8 @@ func orgReportForRoot(ch chan []contribReportItem, root string) (items []contrib
 		if len(result.Rows) == 0 {
 			break
 		}
+		page++
+		fmt.Printf("%s: processing #%d page...\n", pattern, page)
 		processResults()
 	}
 	if result.Cursor == "" {
@@ -1414,14 +1417,6 @@ func enrichOtherMetrics(ch chan struct{}, mtx *sync.RWMutex, report *contribRepo
 	}
 	method := "POST"
 	url := gESURL + "/_sql?format=json"
-	type resultType struct {
-		Cursor string          `json:"cursor"`
-		Rows   [][]interface{} `json:"rows"`
-		Error  struct {
-			Type   string `json:"type"`
-			Reason string `json:"reason"`
-		} `json:"error"`
-	}
 	var result resultType
 	githubPattern := jsonEscape("sds-" + root + "-github-issue")
 	gitPattern := jsonEscape("sds-" + root + "-git")
