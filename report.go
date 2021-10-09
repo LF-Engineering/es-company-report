@@ -21,6 +21,12 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 )
 
+const (
+	// cCreatedAtColumn = "metadata__enriched_on"
+	cCreatedAtColumn = "metadata__timestamp"
+	// cCreatedAtColumn = "metadata__updated_on"
+)
+
 var (
 	gReport     string
 	gESURL      string
@@ -150,8 +156,34 @@ func fatal(str string) {
 	panic("")
 }
 
-func reportThisError(err resultTypeError) bool {
-	return !strings.Contains(fmt.Sprintf("%+v", err), "Unknown index ")
+// return values
+// 1 - report this error
+// 0 - this error is allowed
+// -1 - don't report this error, but retry due to missing 'project_slug' column
+func reportThisError(err resultTypeError) int {
+	errMsg := fmt.Sprintf("%+v", err)
+	// We attempt to get all possible data types using project root, if some data type is not present then this is just fine.
+	if strings.Contains(errMsg, "Unknown index ") {
+		return 0
+	}
+	// We attempt to get PRs data on github-issue indices, some projects have only issues enabled and not PRs - so this is fine too.
+	if strings.Contains(errMsg, "Unknown column ") && strings.Contains(errMsg, "merged_by_data_id") {
+		return 0
+	}
+	// don't report this error, but retry due to missing 'project_slug' column
+	if strings.Contains(errMsg, "Unknown column ") && strings.Contains(errMsg, "project_slug") {
+		return -1
+	}
+	return 1
+}
+
+func reportThisErrorOrg(err resultTypeError) bool {
+	errMsg := fmt.Sprintf("%+v", err)
+	// We attempt to get all possible data types using project root, if some data type is not present then this is just fine.
+	if strings.Contains(errMsg, "Unknown index ") {
+		return false
+	}
+	return true
 }
 
 func getIndices(res map[string]interface{}) (indices []string) {
@@ -166,11 +198,10 @@ func getIndices(res map[string]interface{}) (indices []string) {
 			continue
 		}
 		// to limit data processing while implementing
-		/*
-			if !strings.Contains(idx, "git") {
-				continue
-			}
-		*/
+		// xxx
+		if !strings.Contains(idx, "jira") {
+			continue
+		}
 		indices = append(indices, idx)
 		gAll[idx] = struct{}{}
 	}
@@ -428,20 +459,33 @@ func applySlugMapping(slug string, useDAWhenNotFound bool) (daName, sfName strin
 }
 
 // subrep
-func datalakeLOCReportForRoot(root, projectSlug, sfSlug string, overrideProjectSlug bool) (locItems []datalakeLOCReportItem) {
+func datalakeLOCReportForRoot(root, projectSlug, sfSlug string, overrideProjectSlug, missingCol bool) (locItems []datalakeLOCReportItem, retry bool) {
 	if gDbg {
 		defer func() {
 			fmt.Printf("got LOC %s: %v\n", root, locItems)
 		}()
 	}
-	pattern := jsonEscape("sds-" + root + "-git*,-*-github,-*-github-issue,-*-raw,-*-for-merge,-*-cache,-*-converted,-*-temp,-*-last-action-date-cache")
+	pattern := jsonEscape("sds-" + root + "-git*,-*-github,-*-github-issue,-*-github-repository,-*-github-pull_request,-*-raw,-*-for-merge,-*-cache,-*-converted,-*-temp,-*-last-action-date-cache")
 	method := "POST"
-	data := fmt.Sprintf(
-		`{"query":"select git_uuid, author_id, project_slug, metadata__enriched_on, lines_added, lines_removed from \"%s\" `+
-			`where author_id is not null and type = 'commit' and (lines_added > 0 or lines_removed > 0)","fetch_size":%d}`,
-		pattern,
-		10000,
-	)
+	var data string
+	if missingCol {
+		data = fmt.Sprintf(
+			`{"query":"select git_uuid, author_id, '%s', %s, lines_added, lines_removed from \"%s\" `+
+				`where author_id is not null and type = 'commit' and (lines_added > 0 or lines_removed > 0)","fetch_size":%d}`,
+			projectSlug,
+			cCreatedAtColumn,
+			pattern,
+			10000,
+		)
+	} else {
+		data = fmt.Sprintf(
+			`{"query":"select git_uuid, author_id, project_slug, %s, lines_added, lines_removed from \"%s\" `+
+				`where author_id is not null and type = 'commit' and (lines_added > 0 or lines_removed > 0)","fetch_size":%d}`,
+			cCreatedAtColumn,
+			pattern,
+			10000,
+		)
+	}
 	payloadBytes := []byte(data)
 	payloadBody := bytes.NewReader(payloadBytes)
 	url := gESURL + "/_sql?format=json"
@@ -458,8 +502,12 @@ func datalakeLOCReportForRoot(root, projectSlug, sfSlug string, overrideProjectS
 	fatalError(err)
 	if result.Error.Type != "" || result.Error.Reason != "" {
 		// Missing index error in this case is allowed
-		if gDbg || reportThisError(result.Error) {
+		status := reportThisError(result.Error)
+		if gDbg || status > 0 {
 			fmt.Printf("datalakeLOCReportForRoot: error for %s: %v\n", pattern, result.Error)
+		}
+		if status < 0 {
+			retry = true
 		}
 		return
 	}
@@ -471,12 +519,18 @@ func datalakeLOCReportForRoot(root, projectSlug, sfSlug string, overrideProjectS
 		pSlug = projectSlug
 	}
 	processResults := func() {
+		skipped := 0
 		for _, row := range result.Rows {
 			// [f16103509162d3044c5882a2b0d4c4cf70c16cb0 7f6daae75c73b05795d1cffb2f6642d51ad94ab5 accord/accord-concerto 2021-08-11T12:16:55.000Z 1 1]
 			documentID, _ := row[0].(string)
 			identityID, _ := row[1].(string)
 			if !overrideProjectSlug {
 				pSlug, _ = row[2].(string)
+			}
+			// Skip rows having no enriched date
+			if row[3] == nil {
+				skipped++
+				continue
 			}
 			createdAt, _ := timeParseES(row[3].(string))
 			fLOCAdded, _ := row[4].(float64)
@@ -495,6 +549,9 @@ func datalakeLOCReportForRoot(root, projectSlug, sfSlug string, overrideProjectS
 				filtered:    false,
 			}
 			locItems = append(locItems, item)
+		}
+		if skipped > 0 {
+			fmt.Printf("%s: skipped %d/%d rows due to missing %s\n", pattern, skipped, len(result.Rows), cCreatedAtColumn)
 		}
 	}
 	processResults()
@@ -548,7 +605,7 @@ func datalakeLOCReportForRoot(root, projectSlug, sfSlug string, overrideProjectS
 }
 
 // subrep
-func datalakeGithubPRReportForRoot(root, projectSlug, sfName string, overrideProjectSlug bool) (prItems []datalakePRReportItem) {
+func datalakeGithubPRReportForRoot(root, projectSlug, sfName string, overrideProjectSlug, missingCol bool) (prItems []datalakePRReportItem, retry bool) {
 	if gDbg {
 		defer func() {
 			fmt.Printf("got github-pr %s: %v\n", root, prItems)
@@ -556,12 +613,25 @@ func datalakeGithubPRReportForRoot(root, projectSlug, sfName string, overridePro
 	}
 	pattern := jsonEscape("sds-" + root + "-github-issue*,-*-raw,-*-for-merge,-*-cache,-*-converted,-*-temp,-*-last-action-date-cache")
 	method := "POST"
-	data := fmt.Sprintf(
-		`{"query":"select id, author_id, project_slug, metadata__enriched_on, type, state, merged_by_data_id from \"%s\" `+
-			`where author_id is not null and is_github_pull_request = 1","fetch_size":%d}`,
-		pattern,
-		10000,
-	)
+	var data string
+	if missingCol {
+		data = fmt.Sprintf(
+			`{"query":"select id, author_id, '%s', %s, type, state, merged_by_data_id from \"%s\" `+
+				`where author_id is not null and is_github_pull_request = 1","fetch_size":%d}`,
+			projectSlug,
+			cCreatedAtColumn,
+			pattern,
+			10000,
+		)
+	} else {
+		data = fmt.Sprintf(
+			`{"query":"select id, author_id, project_slug, %s, type, state, merged_by_data_id from \"%s\" `+
+				`where author_id is not null and is_github_pull_request = 1","fetch_size":%d}`,
+			cCreatedAtColumn,
+			pattern,
+			10000,
+		)
+	}
 	payloadBytes := []byte(data)
 	payloadBody := bytes.NewReader(payloadBytes)
 	url := gESURL + "/_sql?format=json"
@@ -578,8 +648,12 @@ func datalakeGithubPRReportForRoot(root, projectSlug, sfName string, overridePro
 	fatalError(err)
 	if result.Error.Type != "" || result.Error.Reason != "" {
 		// Missing index error in this case is allowed
-		if gDbg || reportThisError(result.Error) {
+		status := reportThisError(result.Error)
+		if gDbg || status > 0 {
 			fmt.Printf("datalakeGitHubPRReportForRoot: error for %s: %v\n", pattern, result.Error)
+		}
+		if status < 0 {
+			retry = true
 		}
 		return
 	}
@@ -591,6 +665,7 @@ func datalakeGithubPRReportForRoot(root, projectSlug, sfName string, overridePro
 		pSlug = projectSlug
 	}
 	processResults := func() {
+		skipped := 0
 		for _, row := range result.Rows {
 			// [ffd3f84758dbdd21df9a66b09a96df1ae47db0f3 2ca78b1cc8c9bb81152d3495a5aa8058fba5801c academy-software-foundation/opencolorio 2021-09-16T06:33:13.461Z pull_request closed 5675ad72e0958195400713bc2430e77315cbedf9]
 			// [ffd3f84758dbdd21df9a66b09a96df1ae47db0f3 5675ad72e0958195400713bc2430e77315cbedf9 academy-software-foundation/opencolorio 2021-09-16T06:33:13.461Z pull_request_review APPROVED <nil>]
@@ -599,6 +674,11 @@ func datalakeGithubPRReportForRoot(root, projectSlug, sfName string, overridePro
 			identityID, _ := row[1].(string)
 			if !overrideProjectSlug {
 				pSlug, _ = row[2].(string)
+			}
+			// Skip rows having no enriched date
+			if row[3] == nil {
+				skipped++
+				continue
 			}
 			createdAt, _ := timeParseES(row[3].(string))
 			actionType, _ := row[4].(string)
@@ -632,6 +712,9 @@ func datalakeGithubPRReportForRoot(root, projectSlug, sfName string, overridePro
 			}
 			prItems = append(prItems, item)
 		}
+		if skipped > 0 {
+			fmt.Printf("%s: skipped %d/%d rows due to missing %s\n", pattern, skipped, len(result.Rows), cCreatedAtColumn)
+		}
 	}
 	processResults()
 	page := 1
@@ -684,7 +767,7 @@ func datalakeGithubPRReportForRoot(root, projectSlug, sfName string, overridePro
 }
 
 // subrep
-func datalakeGerritReviewReportForRoot(root, projectSlug, sfName string, overrideProjectSlug bool) (prItems []datalakePRReportItem) {
+func datalakeGerritReviewReportForRoot(root, projectSlug, sfName string, overrideProjectSlug, missingCol bool) (prItems []datalakePRReportItem, retry bool) {
 	if gDbg {
 		defer func() {
 			fmt.Printf("got gerrit-review %s: %v\n", root, prItems)
@@ -692,12 +775,25 @@ func datalakeGerritReviewReportForRoot(root, projectSlug, sfName string, overrid
 	}
 	pattern := jsonEscape("sds-" + root + "-gerrit*,-*-raw,-*-for-merge,-*-cache,-*-converted,-*-temp,-*-last-action-date-cache")
 	method := "POST"
-	data := fmt.Sprintf(
-		`{"query":"select id, author_id, project_slug, metadata__enriched_on, type, approval_value from \"%s\" `+
-			`where author_id is not null","fetch_size":%d}`,
-		pattern,
-		10000,
-	)
+	var data string
+	if missingCol {
+		data = fmt.Sprintf(
+			`{"query":"select id, author_id, '%s', %s, type, approval_value from \"%s\" `+
+				`where author_id is not null","fetch_size":%d}`,
+			projectSlug,
+			cCreatedAtColumn,
+			pattern,
+			10000,
+		)
+	} else {
+		data = fmt.Sprintf(
+			`{"query":"select id, author_id, project_slug, %s, type, approval_value from \"%s\" `+
+				`where author_id is not null","fetch_size":%d}`,
+			cCreatedAtColumn,
+			pattern,
+			10000,
+		)
+	}
 	payloadBytes := []byte(data)
 	payloadBody := bytes.NewReader(payloadBytes)
 	url := gESURL + "/_sql?format=json"
@@ -714,8 +810,12 @@ func datalakeGerritReviewReportForRoot(root, projectSlug, sfName string, overrid
 	fatalError(err)
 	if result.Error.Type != "" || result.Error.Reason != "" {
 		// Missing index error in this case is allowed
-		if gDbg || reportThisError(result.Error) {
+		status := reportThisError(result.Error)
+		if gDbg || status > 0 {
 			fmt.Printf("datalakeGerritReviewReportForRoot: error for %s: %v\n", pattern, result.Error)
+		}
+		if status < 0 {
+			retry = true
 		}
 		return
 	}
@@ -727,6 +827,7 @@ func datalakeGerritReviewReportForRoot(root, projectSlug, sfName string, overrid
 		pSlug = projectSlug
 	}
 	processResults := func() {
+		skipped := 0
 		for _, row := range result.Rows {
 			// [78843539ad1642c4ab74ae6c19772d1a40bf951d a006613a2aefee76acceb8f5fb6867f49c32ebe1 o-ran/shared 2021-09-07T05:56:36.913Z approval 1]
 			// [03c753252a0c27bd890abf272c93e61bb1e28c31 6183ef1a4ac9e5403ff6bf13a1508654def1bb09 o-ran/shared 2021-09-07T05:56:31.998Z patchset <nil>]
@@ -735,6 +836,11 @@ func datalakeGerritReviewReportForRoot(root, projectSlug, sfName string, overrid
 			identityID, _ := row[1].(string)
 			if !overrideProjectSlug {
 				pSlug, _ = row[2].(string)
+			}
+			// Skip rows having no enriched date
+			if row[3] == nil {
+				skipped++
+				continue
 			}
 			createdAt, _ := timeParseES(row[3].(string))
 			actionType, _ := row[4].(string)
@@ -760,6 +866,9 @@ func datalakeGerritReviewReportForRoot(root, projectSlug, sfName string, overrid
 			}
 			prItems = append(prItems, item)
 		}
+		if skipped > 0 {
+			fmt.Printf("%s: skipped %d/%d rows due to missing %s\n", pattern, skipped, len(result.Rows), cCreatedAtColumn)
+		}
 	}
 	processResults()
 	page := 1
@@ -812,7 +921,7 @@ func datalakeGerritReviewReportForRoot(root, projectSlug, sfName string, overrid
 }
 
 // subrep
-func datalakeGithubIssueReportForRoot(root, projectSlug, sfName string, overrideProjectSlug bool) (issueItems []datalakeIssueReportItem) {
+func datalakeGithubIssueReportForRoot(root, projectSlug, sfName string, overrideProjectSlug, missingCol bool) (issueItems []datalakeIssueReportItem, retry bool) {
 	if gDbg {
 		defer func() {
 			fmt.Printf("got github-issue %s: %v\n", root, issueItems)
@@ -820,12 +929,25 @@ func datalakeGithubIssueReportForRoot(root, projectSlug, sfName string, override
 	}
 	pattern := jsonEscape("sds-" + root + "-github-issue*,-*-raw,-*-for-merge,-*-cache,-*-converted,-*-temp,-*-last-action-date-cache")
 	method := "POST"
-	data := fmt.Sprintf(
-		`{"query":"select id, author_id, project_slug, metadata__enriched_on, type from \"%s\" `+
-			`where author_id is not null and is_github_issue = 1","fetch_size":%d}`,
-		pattern,
-		10000,
-	)
+	var data string
+	if missingCol {
+		data = fmt.Sprintf(
+			`{"query":"select id, author_id, '%s', %s, type from \"%s\" `+
+				`where author_id is not null and is_github_issue = 1","fetch_size":%d}`,
+			projectSlug,
+			cCreatedAtColumn,
+			pattern,
+			10000,
+		)
+	} else {
+		data = fmt.Sprintf(
+			`{"query":"select id, author_id, project_slug, %s, type from \"%s\" `+
+				`where author_id is not null and is_github_issue = 1","fetch_size":%d}`,
+			cCreatedAtColumn,
+			pattern,
+			10000,
+		)
+	}
 	payloadBytes := []byte(data)
 	payloadBody := bytes.NewReader(payloadBytes)
 	url := gESURL + "/_sql?format=json"
@@ -842,8 +964,12 @@ func datalakeGithubIssueReportForRoot(root, projectSlug, sfName string, override
 	fatalError(err)
 	if result.Error.Type != "" || result.Error.Reason != "" {
 		// Missing index error in this case is allowed
-		if gDbg || reportThisError(result.Error) {
+		status := reportThisError(result.Error)
+		if gDbg || status > 0 {
 			fmt.Printf("datalakeGitHubIssueReportForRoot: error for %s: %v\n", pattern, result.Error)
+		}
+		if status < 0 {
+			retry = true
 		}
 		return
 	}
@@ -855,6 +981,7 @@ func datalakeGithubIssueReportForRoot(root, projectSlug, sfName string, override
 		pSlug = projectSlug
 	}
 	processResults := func() {
+		skipped := 0
 		for _, row := range result.Rows {
 			// [bdf57807ad938a88ba699da2bdf49bf851884dc9 d21d4c49184b31550fd6526863fb64894f437e64 hyperledger/sawtooth 2021-09-07T14:49:35.631Z issue_assignee]
 			// [9ff1f7e20274861e9415a5af8e7f330055a658f8 342fc492a4e5fd634c527bb09b3c079f0737e3cd ojsf/ojsf-nodejs 2021-09-07T06:22:45.628Z issue_comment]
@@ -862,6 +989,11 @@ func datalakeGithubIssueReportForRoot(root, projectSlug, sfName string, override
 			identityID, _ := row[1].(string)
 			if !overrideProjectSlug {
 				pSlug, _ = row[2].(string)
+			}
+			// Skip rows having no enriched date
+			if row[3] == nil {
+				skipped++
+				continue
 			}
 			createdAt, _ := timeParseES(row[3].(string))
 			actionType, _ := row[4].(string)
@@ -876,6 +1008,9 @@ func datalakeGithubIssueReportForRoot(root, projectSlug, sfName string, override
 				filtered:    false,
 			}
 			issueItems = append(issueItems, item)
+		}
+		if skipped > 0 {
+			fmt.Printf("%s: skipped %d/%d rows due to missing %s\n", pattern, skipped, len(result.Rows), cCreatedAtColumn)
 		}
 	}
 	processResults()
@@ -929,7 +1064,7 @@ func datalakeGithubIssueReportForRoot(root, projectSlug, sfName string, override
 }
 
 // subrep
-func datalakeJiraIssueReportForRoot(root, projectSlug, sfName string, overrideProjectSlug bool) (issueItems []datalakeIssueReportItem) {
+func datalakeJiraIssueReportForRoot(root, projectSlug, sfName string, overrideProjectSlug, missingCol bool) (issueItems []datalakeIssueReportItem, retry bool) {
 	if gDbg {
 		defer func() {
 			fmt.Printf("got jira issue %s: %v\n", root, issueItems)
@@ -938,12 +1073,25 @@ func datalakeJiraIssueReportForRoot(root, projectSlug, sfName string, overridePr
 	// can also get status and/or status_category_key
 	pattern := jsonEscape("sds-" + root + "-jira*,-*-raw,-*-for-merge,-*-cache,-*-converted,-*-temp,-*-last-action-date-cache")
 	method := "POST"
-	data := fmt.Sprintf(
-		`{"query":"select id, author_id, project_slug, metadata__enriched_on, type from \"%s\" `+
-			`where author_id is not null","fetch_size":%d}`,
-		pattern,
-		10000,
-	)
+	var data string
+	if missingCol {
+		data = fmt.Sprintf(
+			`{"query":"select id, author_id, '%s', %s, type from \"%s\" `+
+				`where author_id is not null","fetch_size":%d}`,
+			projectSlug,
+			cCreatedAtColumn,
+			pattern,
+			10000,
+		)
+	} else {
+		data = fmt.Sprintf(
+			`{"query":"select id, author_id, project_slug, %s, type from \"%s\" `+
+				`where author_id is not null","fetch_size":%d}`,
+			cCreatedAtColumn,
+			pattern,
+			10000,
+		)
+	}
 	payloadBytes := []byte(data)
 	payloadBody := bytes.NewReader(payloadBytes)
 	url := gESURL + "/_sql?format=json"
@@ -960,8 +1108,12 @@ func datalakeJiraIssueReportForRoot(root, projectSlug, sfName string, overridePr
 	fatalError(err)
 	if result.Error.Type != "" || result.Error.Reason != "" {
 		// Missing index error in this case is allowed
-		if gDbg || reportThisError(result.Error) {
+		status := reportThisError(result.Error)
+		if gDbg || status > 0 {
 			fmt.Printf("datalakeJiraIssueReportForRoot: error for %s: %v\n", pattern, result.Error)
+		}
+		if status < 0 {
+			retry = true
 		}
 		return
 	}
@@ -973,6 +1125,7 @@ func datalakeJiraIssueReportForRoot(root, projectSlug, sfName string, overridePr
 		pSlug = projectSlug
 	}
 	processResults := func() {
+		skipped := 0
 		for _, row := range result.Rows {
 			// [3fc01f224df4430fa86a03aa7a7d581210e58f64 30f4c2f64cf70d52ed96b4e2fd7f46ae3b59c728 lfn/pnda 2021-09-07T05:42:55.185Z issue]
 			// [053c26541dd50c096e316a38feded0cb1225c051 e439d8d016a641d90ca408b9014afc675d55ad50 hyperledger/cello 2021-09-07T13:57:20.029Z comment]
@@ -980,6 +1133,10 @@ func datalakeJiraIssueReportForRoot(root, projectSlug, sfName string, overridePr
 			identityID, _ := row[1].(string)
 			if !overrideProjectSlug {
 				pSlug, _ = row[2].(string)
+			}
+			if row[3] == nil {
+				skipped++
+				continue
 			}
 			createdAt, _ := timeParseES(row[3].(string))
 			actionType, _ := row[4].(string)
@@ -995,6 +1152,9 @@ func datalakeJiraIssueReportForRoot(root, projectSlug, sfName string, overridePr
 				filtered:    false,
 			}
 			issueItems = append(issueItems, item)
+		}
+		if skipped > 0 {
+			fmt.Printf("%s: skipped %d/%d rows due to missing %s\n", pattern, skipped, len(result.Rows), cCreatedAtColumn)
 		}
 	}
 	processResults()
@@ -1062,9 +1222,11 @@ func datalakeBugzillaIssueReportForRoot(root, projectSlug, sfName string, overri
 	method := "POST"
 	// can also get status and/or status_category_key
 	// TODO: is uuid an unique document key in bugzilla?
-	data := fmt.Sprintf(
-		`{"query":"select uuid, author_id, metadata__enriched_on, status from \"%s\" `+
+	var data string
+	data = fmt.Sprintf(
+		`{"query":"select uuid, author_id, %s, status from \"%s\" `+
 			`where author_id is not null","fetch_size":%d}`,
+		cCreatedAtColumn,
 		pattern,
 		10000,
 	)
@@ -1084,7 +1246,8 @@ func datalakeBugzillaIssueReportForRoot(root, projectSlug, sfName string, overri
 	fatalError(err)
 	if result.Error.Type != "" || result.Error.Reason != "" {
 		// Missing index error in this case is allowed
-		if gDbg || reportThisError(result.Error) {
+		status := reportThisError(result.Error)
+		if gDbg || status > 0 {
 			fmt.Printf("datalakeBugzillaIssueReportForRoot: error for %s: %v\n", pattern, result.Error)
 		}
 		return
@@ -1093,11 +1256,17 @@ func datalakeBugzillaIssueReportForRoot(root, projectSlug, sfName string, overri
 		return
 	}
 	processResults := func() {
+		skipped := 0
 		for _, row := range result.Rows {
 			// [5be4b29396a72501206f561082f2f87f696bc9ef 29dbe15b5c802d2e32e9d02a76798815660005b8 2021-10-04T19:52:27.208Z RESOLVED]
 			// [16e6334b1385f7ff83dac3cd322dfd3ecfdc8f5e 77f6e01aaac4e573205fb8e8097b91b253f76067 2021-10-04T19:52:29.152Z UNCONFIRMED]
 			documentID, _ := row[0].(string)
 			identityID, _ := row[1].(string)
+			// Skip rows having no enriched date
+			if row[2] == nil {
+				skipped++
+				continue
+			}
 			createdAt, _ := timeParseES(row[2].(string))
 			status, _ := row[3].(string)
 			item := datalakeIssueReportItem{
@@ -1111,6 +1280,9 @@ func datalakeBugzillaIssueReportForRoot(root, projectSlug, sfName string, overri
 				filtered:    false,
 			}
 			issueItems = append(issueItems, item)
+		}
+		if skipped > 0 {
+			fmt.Printf("%s: skipped %d/%d rows due to missing %s\n", pattern, skipped, len(result.Rows), cCreatedAtColumn)
 		}
 	}
 	processResults()
@@ -1164,7 +1336,7 @@ func datalakeBugzillaIssueReportForRoot(root, projectSlug, sfName string, overri
 }
 
 // subrep
-func datalakeDocReportForRoot(root, projectSlug, sfName string, overrideProjectSlug bool) (docItems []datalakeDocReportItem) {
+func datalakeDocReportForRoot(root, projectSlug, sfName string, overrideProjectSlug, missingCol bool) (docItems []datalakeDocReportItem, retry bool) {
 	if gDbg {
 		defer func() {
 			fmt.Printf("got docs %s: %v\n", root, docItems)
@@ -1172,12 +1344,17 @@ func datalakeDocReportForRoot(root, projectSlug, sfName string, overrideProjectS
 	}
 	pattern := jsonEscape("sds-" + root + "-confluence*,-*-raw,-*-for-merge,-*-cache,-*-converted,-*-temp,-*-last-action-date-cache")
 	method := "POST"
-	data := fmt.Sprintf(
-		`{"query":"select uuid, author_id, project_slug, metadata__enriched_on, type from \"%s\" `+
-			`where author_id is not null","fetch_size":%d}`,
-		pattern,
-		10000,
-	)
+	var data string
+	if missingCol {
+	} else {
+		data = fmt.Sprintf(
+			`{"query":"select uuid, author_id, project_slug, %s, type from \"%s\" `+
+				`where author_id is not null","fetch_size":%d}`,
+			cCreatedAtColumn,
+			pattern,
+			10000,
+		)
+	}
 	payloadBytes := []byte(data)
 	payloadBody := bytes.NewReader(payloadBytes)
 	url := gESURL + "/_sql?format=json"
@@ -1194,8 +1371,12 @@ func datalakeDocReportForRoot(root, projectSlug, sfName string, overrideProjectS
 	fatalError(err)
 	if result.Error.Type != "" || result.Error.Reason != "" {
 		// Missing index error in this case is allowed
-		if gDbg || reportThisError(result.Error) {
+		status := reportThisError(result.Error)
+		if gDbg || status > 0 {
 			fmt.Printf("datalakeDocReportForRoot: error for %s: %v\n", pattern, result.Error)
+		}
+		if status < 0 {
+			retry = true
 		}
 		return
 	}
@@ -1207,12 +1388,18 @@ func datalakeDocReportForRoot(root, projectSlug, sfName string, overrideProjectS
 		pSlug = projectSlug
 	}
 	processResults := func() {
+		skipped := 0
 		for _, row := range result.Rows {
 			// [cff117ac4b479e31473727cd775f7e96746e7e7e 9e7702dd25aac483d9104b4ba93fa1b73c751083 academy-software-foundation/academy-software-foundation-common 2021-10-01T05:14:53.931Z page]
 			documentID, _ := row[0].(string)
 			identityID, _ := row[1].(string)
 			if !overrideProjectSlug {
 				pSlug, _ = row[2].(string)
+			}
+			// Skip rows having no enriched date
+			if row[3] == nil {
+				skipped++
+				continue
 			}
 			createdAt, _ := timeParseES(row[3].(string))
 			actionType, _ := row[4].(string)
@@ -1227,6 +1414,9 @@ func datalakeDocReportForRoot(root, projectSlug, sfName string, overrideProjectS
 				filtered:    false,
 			}
 			docItems = append(docItems, item)
+		}
+		if skipped > 0 {
+			fmt.Printf("%s: skipped %d/%d rows due to missing %s\n", pattern, skipped, len(result.Rows), cCreatedAtColumn)
 		}
 	}
 	processResults()
@@ -1294,25 +1484,44 @@ func datalakeReportForRoot(ch chan datalakeReport, msg, root string, dataSourceT
 		ch <- itemData
 	}()
 	daName, sfName, found := applySlugMapping(root, false)
+	var retry bool
 	if gDbg {
 		fmt.Printf("running for: %s %v -> %s,%s,%v\n", root, dataSourceTypes, daName, sfName, found)
 	}
 	if bLOC {
-		itemData.locItems = datalakeLOCReportForRoot(root, daName, sfName, found)
+		itemData.locItems, retry = datalakeLOCReportForRoot(root, daName, sfName, found, false)
+		if retry {
+			itemData.locItems, _ = datalakeLOCReportForRoot(root, daName, sfName, found, true)
+		}
 	}
 	if bDocs {
-		itemData.docItems = datalakeDocReportForRoot(root, daName, sfName, found)
+		itemData.docItems, retry = datalakeDocReportForRoot(root, daName, sfName, found, false)
+		if retry {
+			itemData.docItems, _ = datalakeDocReportForRoot(root, daName, sfName, found, true)
+		}
 	}
 	if bPRs {
-		itemData.prItems = datalakeGithubPRReportForRoot(root, daName, sfName, found)
-		prItems := datalakeGerritReviewReportForRoot(root, daName, sfName, found)
+		itemData.prItems, retry = datalakeGithubPRReportForRoot(root, daName, sfName, found, false)
+		if retry {
+			itemData.prItems, _ = datalakeGithubPRReportForRoot(root, daName, sfName, found, true)
+		}
+		prItems, retry := datalakeGerritReviewReportForRoot(root, daName, sfName, found, false)
+		if retry {
+			prItems, _ = datalakeGerritReviewReportForRoot(root, daName, sfName, found, true)
+		}
 		if len(prItems) > 0 {
 			itemData.prItems = append(itemData.prItems, prItems...)
 		}
 	}
 	if bIssues {
-		itemData.issueItems = datalakeGithubIssueReportForRoot(root, daName, sfName, found)
-		issueItems := datalakeJiraIssueReportForRoot(root, daName, sfName, found)
+		itemData.issueItems, retry = datalakeGithubIssueReportForRoot(root, daName, sfName, found, false)
+		if retry {
+			itemData.issueItems, _ = datalakeGithubIssueReportForRoot(root, daName, sfName, found, true)
+		}
+		issueItems, retry := datalakeJiraIssueReportForRoot(root, daName, sfName, found, false)
+		if retry {
+			issueItems, _ = datalakeJiraIssueReportForRoot(root, daName, sfName, found, true)
+		}
 		if len(issueItems) > 0 {
 			itemData.issueItems = append(itemData.issueItems, issueItems...)
 		}
@@ -1361,7 +1570,7 @@ func orgReportForRoot(ch chan []contribReportItem, root string) (items []contrib
 	fatalError(err)
 	if result.Error.Type != "" || result.Error.Reason != "" {
 		// Missing index error in this case is allowed
-		if gDbg || reportThisError(result.Error) {
+		if gDbg || reportThisErrorOrg(result.Error) {
 			fmt.Printf("error for %s: %v\n", pattern, result.Error)
 		}
 		return
