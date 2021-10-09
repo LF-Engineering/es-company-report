@@ -35,6 +35,7 @@ var (
 	gDt         time.Time
 	gNamePrefix string
 	gMaxThreads int
+	gProgress   bool
 )
 
 var gDtMtx = &sync.Mutex{}
@@ -523,7 +524,9 @@ func datalakeLOCReportForRoot(root, projectSlug, sfSlug string, overrideProjectS
 			break
 		}
 		page++
-		fmt.Printf("%s: processing #%d page...\n", pattern, page)
+		if gDbg || gProgress {
+			fmt.Printf("%s: processing #%d page...\n", pattern, page)
+		}
 		processResults()
 	}
 	if result.Cursor == "" {
@@ -657,7 +660,9 @@ func datalakeGithubPRReportForRoot(root, projectSlug, sfName string, overridePro
 			break
 		}
 		page++
-		fmt.Printf("%s: processing #%d page...\n", pattern, page)
+		if gDbg || gProgress {
+			fmt.Printf("%s: processing #%d page...\n", pattern, page)
+		}
 		processResults()
 	}
 	if result.Cursor == "" {
@@ -783,7 +788,9 @@ func datalakeGerritReviewReportForRoot(root, projectSlug, sfName string, overrid
 			break
 		}
 		page++
-		fmt.Printf("%s: processing #%d page...\n", pattern, page)
+		if gDbg || gProgress {
+			fmt.Printf("%s: processing #%d page...\n", pattern, page)
+		}
 		processResults()
 	}
 	if result.Cursor == "" {
@@ -898,7 +905,9 @@ func datalakeGithubIssueReportForRoot(root, projectSlug, sfName string, override
 			break
 		}
 		page++
-		fmt.Printf("%s: processing #%d page...\n", pattern, page)
+		if gDbg || gProgress {
+			fmt.Printf("%s: processing #%d page...\n", pattern, page)
+		}
 		processResults()
 	}
 	if result.Cursor == "" {
@@ -1015,7 +1024,9 @@ func datalakeJiraIssueReportForRoot(root, projectSlug, sfName string, overridePr
 			break
 		}
 		page++
-		fmt.Printf("%s: processing #%d page...\n", pattern, page)
+		if gDbg || gProgress {
+			fmt.Printf("%s: processing #%d page...\n", pattern, page)
+		}
 		processResults()
 	}
 	if result.Cursor == "" {
@@ -1129,7 +1140,9 @@ func datalakeBugzillaIssueReportForRoot(root, projectSlug, sfName string, overri
 			break
 		}
 		page++
-		fmt.Printf("%s: processing #%d page...\n", pattern, page)
+		if gDbg || gProgress {
+			fmt.Printf("%s: processing #%d page...\n", pattern, page)
+		}
 		processResults()
 	}
 	if result.Cursor == "" {
@@ -1243,7 +1256,9 @@ func datalakeDocReportForRoot(root, projectSlug, sfName string, overrideProjectS
 			break
 		}
 		page++
-		fmt.Printf("%s: processing #%d page...\n", pattern, page)
+		if gDbg || gProgress {
+			fmt.Printf("%s: processing #%d page...\n", pattern, page)
+		}
 		processResults()
 	}
 	if result.Cursor == "" {
@@ -1405,7 +1420,9 @@ func orgReportForRoot(ch chan []contribReportItem, root string) (items []contrib
 			break
 		}
 		page++
-		fmt.Printf("%s: processing #%d page...\n", pattern, page)
+		if gDbg || gProgress {
+			fmt.Printf("%s: processing #%d page...\n", pattern, page)
+		}
 		processResults()
 	}
 	if result.Cursor == "" {
@@ -2326,6 +2343,7 @@ func setupSHDB() {
 
 func setupEnvs() {
 	gDbg = os.Getenv("DBG") != ""
+	gProgress = os.Getenv("PROGRESS") != ""
 	gReport = os.Getenv("REPORT")
 	if gReport == "" {
 		fatal("REPORT must be set")
@@ -2353,6 +2371,7 @@ func setupEnvs() {
 		if gMaxThreads < 0 {
 			gMaxThreads = 0
 		}
+		fmt.Printf("Limit threads to: %d\n", gMaxThreads)
 	}
 	switch gReport {
 	case "org":
