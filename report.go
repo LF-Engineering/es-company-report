@@ -439,27 +439,29 @@ func applySlugMapping(slug string, useDAWhenNotFound bool) (daName, sfName strin
 			slugs = append(slugs, strings.Join(ary[:i], "-")+"/"+strings.Join(ary[i:], "-"))
 		}
 	}
-	if strings.HasSuffix(slug, "-common") {
-		newSlug := slug[:len(slug)-7]
-		if gDbg {
-			fmt.Printf("common slug detected: '%s' -> '%s'\n", slug, newSlug)
-		}
-		slugs = append(slugs, newSlug)
-		ary := strings.Split(newSlug, "-")
-		n := len(ary)
-		for i := 1; i < n; i++ {
-			slugs = append(slugs, strings.Join(ary[:i], "-")+"/"+strings.Join(ary[i:], "-"))
-		}
-		if n > 1 {
-			ary = ary[:n-1]
-			n--
-			newSlug := strings.Join(ary, "-")
-			slugs = append(slugs, newSlug)
+	for _, kw := range []string{"common", "all"} {
+		if strings.HasSuffix(slug, "-"+kw) {
+			newSlug := slug[:len(slug)-(len(kw)+1)]
 			if gDbg {
-				fmt.Printf("common slug detected (2nd attempt): '%s' -> '%s'\n", slug, newSlug)
+				fmt.Printf("%s slug detected: '%s' -> '%s'\n", kw, slug, newSlug)
 			}
+			slugs = append(slugs, newSlug)
+			ary := strings.Split(newSlug, "-")
+			n := len(ary)
 			for i := 1; i < n; i++ {
 				slugs = append(slugs, strings.Join(ary[:i], "-")+"/"+strings.Join(ary[i:], "-"))
+			}
+			if n > 1 {
+				ary = ary[:n-1]
+				n--
+				newSlug := strings.Join(ary, "-")
+				slugs = append(slugs, newSlug)
+				if gDbg {
+					fmt.Printf("%s slug detected (2nd attempt): '%s' -> '%s'\n", kw, slug, newSlug)
+				}
+				for i := 1; i < n; i++ {
+					slugs = append(slugs, strings.Join(ary[:i], "-")+"/"+strings.Join(ary[i:], "-"))
+				}
 			}
 		}
 	}
