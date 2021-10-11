@@ -42,6 +42,7 @@ var (
 	gNamePrefix string
 	gMaxThreads int
 	gProgress   bool
+	gFiltered   bool
 )
 
 var gDtMtx = &sync.Mutex{}
@@ -213,7 +214,9 @@ func getIndices(res map[string]interface{}, aliases bool) (indices []string) {
 			}
 			if cnt == 0 {
 				gAll[idx] = 0
-				fmt.Printf("skipping an empty index %s\n", idx)
+				if gDbg {
+					fmt.Printf("skipping an empty index %s\n", idx)
+				}
 				continue
 			}
 			indices = append(indices, idx)
@@ -222,7 +225,9 @@ func getIndices(res map[string]interface{}, aliases bool) (indices []string) {
 		}
 		cnt, ok := gAll[idx]
 		if ok && cnt == 0 {
-			fmt.Printf("skipping an empty index from alias %s\n", idx)
+			if gDbg {
+				fmt.Printf("skipping an empty index from alias %s\n", idx)
+			}
 			continue
 		}
 		if !ok {
@@ -2123,7 +2128,9 @@ func saveDatalakeLOCReport(report []datalakeLOCReportItem) {
 			toYMDHMSDate(item.createdAt),
 			strconv.Itoa(item.locAdded),
 			strconv.Itoa(item.locDeleted),
-			filtered,
+		}
+		if gFiltered {
+			row = append(row, filtered)
 		}
 		rows = append(rows, row)
 	}
@@ -2140,7 +2147,11 @@ func saveDatalakeLOCReport(report []datalakeLOCReportItem) {
 	defer func() { _ = file.Close() }()
 	writer = csv.NewWriter(file)
 	defer writer.Flush()
-	fatalError(writer.Write([]string{"ES Document Id", "Identity Id", "Datasource", "Insights Project Slug", "Salesforce Project Slug", "Created At", "LOC Added", "LOC Deleted", "Filtered"}))
+	if gFiltered {
+		fatalError(writer.Write([]string{"ES Document Id", "Identity Id", "Datasource", "Insights Project Slug", "Salesforce Project Slug", "Created At", "LOC Added", "LOC Deleted", "Filtered"}))
+	} else {
+		fatalError(writer.Write([]string{"ES Document Id", "Identity Id", "Datasource", "Insights Project Slug", "Salesforce Project Slug", "Created At", "LOC Added", "LOC Deleted"}))
+	}
 	for _, row := range rows {
 		fatalError(writer.Write(row))
 	}
@@ -2220,7 +2231,9 @@ func saveDatalakePRsReport(report []datalakePRReportItem) {
 			item.sfSlug,
 			toYMDHMSDate(item.createdAt),
 			toPRType(item.actionType),
-			filtered,
+		}
+		if gFiltered {
+			row = append(row, filtered)
 		}
 		rows = append(rows, row)
 	}
@@ -2237,7 +2250,11 @@ func saveDatalakePRsReport(report []datalakePRReportItem) {
 	defer func() { _ = file.Close() }()
 	writer = csv.NewWriter(file)
 	defer writer.Flush()
-	fatalError(writer.Write([]string{"ES Document Id", "Identity Id", "Datasource", "Insights Project Slug", "Salesforce Project Slug", "Created At", "Type", "Filtered"}))
+	if gFiltered {
+		fatalError(writer.Write([]string{"ES Document Id", "Identity Id", "Datasource", "Insights Project Slug", "Salesforce Project Slug", "Created At", "Type", "Filtered"}))
+	} else {
+		fatalError(writer.Write([]string{"ES Document Id", "Identity Id", "Datasource", "Insights Project Slug", "Salesforce Project Slug", "Created At", "Type"}))
+	}
 	for _, row := range rows {
 		fatalError(writer.Write(row))
 	}
@@ -2260,7 +2277,9 @@ func saveDatalakeIssuesReport(report []datalakeIssueReportItem) {
 			item.sfSlug,
 			toYMDHMSDate(item.createdAt),
 			toIssueType(item.actionType),
-			filtered,
+		}
+		if gFiltered {
+			row = append(row, filtered)
 		}
 		rows = append(rows, row)
 	}
@@ -2277,7 +2296,11 @@ func saveDatalakeIssuesReport(report []datalakeIssueReportItem) {
 	defer func() { _ = file.Close() }()
 	writer = csv.NewWriter(file)
 	defer writer.Flush()
-	fatalError(writer.Write([]string{"ES Document Id", "Identity Id", "Datasource", "Insights Project Slug", "Salesforce Project Slug", "Created At", "Type", "Filtered"}))
+	if gFiltered {
+		fatalError(writer.Write([]string{"ES Document Id", "Identity Id", "Datasource", "Insights Project Slug", "Salesforce Project Slug", "Created At", "Type", "Filtered"}))
+	} else {
+		fatalError(writer.Write([]string{"ES Document Id", "Identity Id", "Datasource", "Insights Project Slug", "Salesforce Project Slug", "Created At", "Type"}))
+	}
 	for _, row := range rows {
 		fatalError(writer.Write(row))
 	}
@@ -2315,7 +2338,9 @@ func saveDatalakeDocsReport(report []datalakeDocReportItem) {
 			item.sfSlug,
 			toYMDHMSDate(item.createdAt),
 			toDocType(item.actionType),
-			filtered,
+		}
+		if gFiltered {
+			row = append(row, filtered)
 		}
 		rows = append(rows, row)
 	}
@@ -2332,7 +2357,11 @@ func saveDatalakeDocsReport(report []datalakeDocReportItem) {
 	defer func() { _ = file.Close() }()
 	writer = csv.NewWriter(file)
 	defer writer.Flush()
-	fatalError(writer.Write([]string{"ES Document Id", "Identity Id", "Datasource", "Insights Project Slug", "Salesforce Project Slug", "Created At", "Type", "Filtered"}))
+	if gFiltered {
+		fatalError(writer.Write([]string{"ES Document Id", "Identity Id", "Datasource", "Insights Project Slug", "Salesforce Project Slug", "Created At", "Type", "Filtered"}))
+	} else {
+		fatalError(writer.Write([]string{"ES Document Id", "Identity Id", "Datasource", "Insights Project Slug", "Salesforce Project Slug", "Created At", "Type"}))
+	}
 	for _, row := range rows {
 		fatalError(writer.Write(row))
 	}
@@ -2450,6 +2479,9 @@ func dedupDatalakeReport(report *datalakeReport, bLOC, bDocs, bPRs, bIssues bool
 
 // subrep
 func filterDatalakeReport(report *datalakeReport, identityIDs map[string]struct{}, bLOC, bDocs, bPRs, bIssues bool) {
+	if !gFiltered {
+		return
+	}
 	if bLOC {
 		locFiltered := 0
 		for i, locItem := range report.locItems {
@@ -2549,8 +2581,11 @@ func genDatalakeReport(roots, dataSourceTypes []string) {
 	//	 roots = roots[:20]
 	// }
 	runtime.GOMAXPROCS(thrN)
-	chIdentIDs := make(chan map[string]struct{})
-	go getAffiliatedNonBotIdentities(chIdentIDs)
+	var chIdentIDs chan map[string]struct{}
+	if gFiltered {
+		chIdentIDs = make(chan map[string]struct{})
+		go getAffiliatedNonBotIdentities(chIdentIDs)
+	}
 	ch := make(chan datalakeReport)
 	report := datalakeReport{}
 	nThreads := 0
@@ -2599,9 +2634,11 @@ func genDatalakeReport(roots, dataSourceTypes []string) {
 	}
 	// subrep
 	dedupDatalakeReport(&report, bLOC, bDocs, bPRs, bIssues)
-	identityIDs := <-chIdentIDs
-	fmt.Printf("%d non-bot identities having at least one enrollment present in SH DB\n", len(identityIDs))
-	filterDatalakeReport(&report, identityIDs, bLOC, bDocs, bPRs, bIssues)
+	if gFiltered {
+		identityIDs := <-chIdentIDs
+		fmt.Printf("%d non-bot identities having at least one enrollment present in SH DB\n", len(identityIDs))
+		filterDatalakeReport(&report, identityIDs, bLOC, bDocs, bPRs, bIssues)
+	}
 	if bLOC {
 		saveDatalakeLOCReport(report.locItems)
 	}
@@ -2684,6 +2721,7 @@ func setupEnvs() {
 		for _, sub := range ary {
 			gSubReport[strings.TrimSpace(sub)] = struct{}{}
 		}
+		gDbg = os.Getenv("FILTERED") != ""
 	default:
 		fatal("unknown report type: " + gReport)
 	}
