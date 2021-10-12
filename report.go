@@ -2150,9 +2150,9 @@ func saveDatalakeLOCReport(report []datalakeLOCReportItem) {
 	writer = csv.NewWriter(file)
 	defer writer.Flush()
 	if gFiltered {
-		fatalError(writer.Write([]string{"ES Document Id", "Identity Id", "Datasource", "Insights Project Slug", "Salesforce Project Slug", "Created At", "LOC Added", "LOC Deleted", "Filtered"}))
+		fatalError(writer.Write([]string{"document_id", "identity_id", "datasource", "insights_project_slug", "project_slug", "created_at", "loc_added", "loc_deleted", "filtered"}))
 	} else {
-		fatalError(writer.Write([]string{"ES Document Id", "Identity Id", "Datasource", "Insights Project Slug", "Salesforce Project Slug", "Created At", "LOC Added", "LOC Deleted"}))
+		fatalError(writer.Write([]string{"document_id", "identity_id", "datasource", "insights_project_slug", "project_slug", "created_at", "loc_added", "loc_deleted"}))
 	}
 	for _, row := range rows {
 		fatalError(writer.Write(row))
@@ -2253,9 +2253,9 @@ func saveDatalakePRsReport(report []datalakePRReportItem) {
 	writer = csv.NewWriter(file)
 	defer writer.Flush()
 	if gFiltered {
-		fatalError(writer.Write([]string{"ES Document Id", "Identity Id", "Datasource", "Insights Project Slug", "Salesforce Project Slug", "Created At", "Type", "Filtered"}))
+		fatalError(writer.Write([]string{"document_id", "identity_id", "datasource", "insights_project_slug", "project_slug", "created_at", "type", "filtered"}))
 	} else {
-		fatalError(writer.Write([]string{"ES Document Id", "Identity Id", "Datasource", "Insights Project Slug", "Salesforce Project Slug", "Created At", "Type"}))
+		fatalError(writer.Write([]string{"document_id", "identity_id", "datasource", "insights_project_slug", "project_slug", "created_at", "type"}))
 	}
 	for _, row := range rows {
 		fatalError(writer.Write(row))
@@ -2299,9 +2299,9 @@ func saveDatalakeIssuesReport(report []datalakeIssueReportItem) {
 	writer = csv.NewWriter(file)
 	defer writer.Flush()
 	if gFiltered {
-		fatalError(writer.Write([]string{"ES Document Id", "Identity Id", "Datasource", "Insights Project Slug", "Salesforce Project Slug", "Created At", "Type", "Filtered"}))
+		fatalError(writer.Write([]string{"document_id", "identity_id", "datasource", "insights_project_slug", "project_slug", "created_at", "type", "filtered"}))
 	} else {
-		fatalError(writer.Write([]string{"ES Document Id", "Identity Id", "Datasource", "Insights Project Slug", "Salesforce Project Slug", "Created At", "Type"}))
+		fatalError(writer.Write([]string{"document_id", "identity_id", "datasource", "insights_project_slug", "project_slug", "created_at", "type"}))
 	}
 	for _, row := range rows {
 		fatalError(writer.Write(row))
@@ -2360,9 +2360,9 @@ func saveDatalakeDocsReport(report []datalakeDocReportItem) {
 	writer = csv.NewWriter(file)
 	defer writer.Flush()
 	if gFiltered {
-		fatalError(writer.Write([]string{"ES Document Id", "Identity Id", "Datasource", "Insights Project Slug", "Salesforce Project Slug", "Created At", "Type", "Filtered"}))
+		fatalError(writer.Write([]string{"document_id", "identity_id", "datasource", "insights_project_slug", "project_slug", "created_at", "type", "filtered"}))
 	} else {
-		fatalError(writer.Write([]string{"ES Document Id", "Identity Id", "Datasource", "Insights Project Slug", "Salesforce Project Slug", "Created At", "Type"}))
+		fatalError(writer.Write([]string{"document_id", "identity_id", "datasource", "insights_project_slug", "project_slug", "created_at", "type"}))
 	}
 	for _, row := range rows {
 		fatalError(writer.Write(row))
