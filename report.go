@@ -2320,7 +2320,8 @@ func toDocType(inType string) string {
 	case "page":
 		return "Confluence page edited"
 	default:
-		return "?"
+		// If any other type of document activity is identified then mark the activity as 'Other'
+		return "Other"
 	}
 }
 
