@@ -2319,6 +2319,8 @@ func toDocType(inType string) string {
 		return "Confluence page created"
 	case "page":
 		return "Confluence page edited"
+	case "blogpost":
+		return "Confluence blog post created"
 	default:
 		// If any other type of document activity is identified then mark the activity as 'Other'
 		return "Other"
