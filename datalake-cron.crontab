@@ -1,0 +1,1 @@
+0 0 * * * PATH=$PATH:/snap/bin /usr/bin/datalake-cron.sh 1>> /tmp/datalake-cron.log 2>>/tmp/datalake-cron.err

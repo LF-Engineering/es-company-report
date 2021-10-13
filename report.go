@@ -161,6 +161,10 @@ func fatal(str string) {
 	panic("")
 }
 
+func fatalf(f string, a ...interface{}) {
+	fatalError(fmt.Errorf(f, a...))
+}
+
 // return values
 // 1 - report this error
 // 0 - this error is allowed
@@ -204,12 +208,10 @@ func getIndices(res map[string]interface{}, aliases bool) (indices []string) {
 			continue
 		}
 		// to limit data processing while implementing
-		// yyy
-		/*
-			if !strings.Contains(idx, "finos") {
-				continue
-			}
-		*/
+		// yyy xxx
+		if !strings.Contains(idx, "prometheus") {
+			continue
+		}
 		if !aliases {
 			sCnt, _ := item["docs.count"].(string)
 			cnt, _ := strconv.Atoi(sCnt)
@@ -505,9 +507,41 @@ func applySlugMapping(slug string, useDAWhenNotFound bool) (daName, sfName strin
 }
 
 func getPatternIncrementalDate(key string) string {
-	// xxx
-	// return " and metadata__timestamp >= '2021-10-01T00:00:00'"
-	return ""
+	method := "POST"
+	data := `{"query":"select max(dt) from \"datalake-status\" where key = '` + key + `'"}`
+	payloadBytes := []byte(data)
+	payloadBody := bytes.NewReader(payloadBytes)
+	url := gESLogURL + "/_sql?format=json"
+	req, err := http.NewRequest(method, url, payloadBody)
+	fatalError(err)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	fatalError(err)
+	body, err := ioutil.ReadAll(resp.Body)
+	fatalError(err)
+	_ = resp.Body.Close()
+	var result resultType
+	err = jsoniter.Unmarshal(body, &result)
+	fatalError(err)
+	if result.Error.Type != "" || result.Error.Reason != "" {
+		if gDbg {
+			// fmt.Printf("getPatternIncrementalDate(%s): %s/%s: %v\n", key, url, data, result)
+			fmt.Printf("getPatternIncrementalDate: error for %s: %v\n", key, result.Error)
+		}
+		return ""
+	}
+	if len(result.Rows) < 1 || len(result.Rows[0]) < 1 {
+		return ""
+	}
+	sDt, ok := result.Rows[0][0].(string)
+	if !ok {
+		return ""
+	}
+	cond := " and " + cCreatedAtColumn + " >= '" + sDt + "'"
+	if gDbg {
+		fmt.Printf("%s condition: %s >= %s\n", key, cCreatedAtColumn, sDt)
+	}
+	return cond
 }
 
 func savePatternIncrementalDate(key string, when time.Time) {
@@ -518,11 +552,36 @@ func savePatternIncrementalDate(key string, when time.Time) {
 
 func saveIncrementalDates(thrN int) {
 	fmt.Printf("saving %d sync dates status...\n", len(gSyncDates))
+	type docType struct {
+		Dt  time.Time `json:"dt"`
+		Key string    `json:"key"`
+	}
 	save := func(ch chan struct{}, key string, when time.Time) {
 		defer func() {
 			ch <- struct{}{}
 		}()
-		// xxx
+		data := docType{Key: key, Dt: when}
+		payloadBytes, err := jsoniter.Marshal(data)
+		fatalError(err)
+		payloadBody := bytes.NewReader(payloadBytes)
+		method := "POST"
+		url := gESLogURL + "/datalake-status/_doc?refresh=wait_for"
+		req, err := http.NewRequest(method, os.ExpandEnv(url), payloadBody)
+		fatalError(err)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		fatalError(err)
+		defer func() {
+			_ = resp.Body.Close()
+		}()
+		if resp.StatusCode != 201 {
+			body, err := ioutil.ReadAll(resp.Body)
+			fatalError(err)
+			fatalf("Method:%s url:%s status:%d data:%+v\n%s", method, url, resp.StatusCode, data, body)
+		}
+		if gDbg {
+			fmt.Printf("saved sync date '%s' -> '%v'\n", key, when)
+		}
 	}
 	ch := make(chan struct{})
 	nThreads := 0
@@ -545,7 +604,7 @@ func saveIncrementalDates(thrN int) {
 func datalakeLOCReportForRoot(root, projectSlug, sfSlug string, overrideProjectSlug, missingCol bool) (locItems []datalakeLOCReportItem, retry bool) {
 	if gDbg {
 		defer func() {
-			fmt.Printf("got LOC %s: %v\n", root, locItems)
+			fmt.Printf("got LOC %s: %d\n", root, len(locItems))
 		}()
 	}
 	var fromCond string
@@ -706,7 +765,7 @@ func datalakeLOCReportForRoot(root, projectSlug, sfSlug string, overrideProjectS
 func datalakeGithubPRReportForRoot(root, projectSlug, sfName string, overrideProjectSlug, missingCol bool) (prItems []datalakePRReportItem, retry bool) {
 	if gDbg {
 		defer func() {
-			fmt.Printf("got github-pr %s: %v\n", root, prItems)
+			fmt.Printf("got github-pr %s: %d\n", root, len(prItems))
 		}()
 	}
 	var fromCond string
@@ -883,7 +942,7 @@ func datalakeGithubPRReportForRoot(root, projectSlug, sfName string, overridePro
 func datalakeGerritReviewReportForRoot(root, projectSlug, sfName string, overrideProjectSlug, missingCol bool) (prItems []datalakePRReportItem, retry bool) {
 	if gDbg {
 		defer func() {
-			fmt.Printf("got gerrit-review %s: %v\n", root, prItems)
+			fmt.Printf("got gerrit-review %s: %d\n", root, len(prItems))
 		}()
 	}
 	var fromCond string
@@ -1052,7 +1111,7 @@ func datalakeGerritReviewReportForRoot(root, projectSlug, sfName string, overrid
 func datalakeGithubIssueReportForRoot(root, projectSlug, sfName string, overrideProjectSlug, missingCol bool) (issueItems []datalakeIssueReportItem, retry bool) {
 	if gDbg {
 		defer func() {
-			fmt.Printf("got github-issue %s: %v\n", root, issueItems)
+			fmt.Printf("got github-issue %s: %d\n", root, len(issueItems))
 		}()
 	}
 	var fromCond string
@@ -1210,7 +1269,7 @@ func datalakeGithubIssueReportForRoot(root, projectSlug, sfName string, override
 func datalakeJiraIssueReportForRoot(root, projectSlug, sfName string, overrideProjectSlug, missingCol bool) (issueItems []datalakeIssueReportItem, retry bool) {
 	if gDbg {
 		defer func() {
-			fmt.Printf("got jira issue %s: %v\n", root, issueItems)
+			fmt.Printf("got jira issue %s: %d\n", root, len(issueItems))
 		}()
 	}
 	var fromCond string
@@ -1373,7 +1432,7 @@ func datalakeBugzillaIssueReportForRoot(root, projectSlug, sfName string, overri
 	}
 	if gDbg {
 		defer func() {
-			fmt.Printf("got %s issue %s: %v\n", ds, root, issueItems)
+			fmt.Printf("got %s issue %s: %d\n", ds, root, len(issueItems))
 		}()
 	}
 	var fromCond string
@@ -1514,7 +1573,7 @@ func datalakeBugzillaIssueReportForRoot(root, projectSlug, sfName string, overri
 func datalakeDocReportForRoot(root, projectSlug, sfName string, overrideProjectSlug, missingCol bool) (docItems []datalakeDocReportItem, retry bool) {
 	if gDbg {
 		defer func() {
-			fmt.Printf("got docs %s: %v\n", root, docItems)
+			fmt.Printf("got docs %s: %d\n", root, len(docItems))
 		}()
 	}
 	var fromCond string
