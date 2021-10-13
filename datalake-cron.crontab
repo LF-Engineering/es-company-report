@@ -1,1 +1,1 @@
-22 2 * * * PATH=$PATH:/snap/bin /usr/bin/datalake-cron.sh 1>> /tmp/datalake-cron.log 2>>/tmp/datalake-cron.err
+22 2 * * * GOPATH=/root/go PATH=$PATH:/snap/bin:$GOPATH/bin su root -c /usr/bin/datalake-cron.sh 1>> /tmp/datalake-cron.log 2>>/tmp/datalake-cron.err

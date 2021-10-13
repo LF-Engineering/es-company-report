@@ -8,5 +8,5 @@ git pull || exit 2
 make report || exit 3
 date >> prod_datalake.log
 echo "---------------------------------" >> prod_datalake.log
-INCREMENTAL=1 REPORT=datalake MAX_THREADS=4 DATASOURCES='git,github-issue,gerrit,jira,bugzilla,bugzillarest,confluence' NAME_PREFIX=prod ./run.sh prod | tee -a prod_datalake.log
+INCREMENTAL=1 REPORT=datalake MAX_THREADS=6 DATASOURCES='git,github-issue,gerrit,jira,bugzilla,bugzillarest,confluence' NAME_PREFIX=prod ./run.sh prod | tee -a prod_datalake.log
 echo '' >> prod_datalake.log
