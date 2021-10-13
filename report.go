@@ -28,21 +28,25 @@ const (
 )
 
 var (
-	gReport     string
-	gESURL      string
-	gDB         *sqlx.DB
-	gOrg        string
-	gFrom       string
-	gTo         string
-	gDbg        bool
-	gDatasource map[string]struct{}
-	gSubReport  map[string]struct{}
-	gAll        map[string]int
-	gDt         time.Time
-	gNamePrefix string
-	gMaxThreads int
-	gProgress   bool
-	gFiltered   bool
+	gReport       string
+	gESURL        string
+	gDB           *sqlx.DB
+	gOrg          string
+	gFrom         string
+	gTo           string
+	gDbg          bool
+	gDatasource   map[string]struct{}
+	gSubReport    map[string]struct{}
+	gAll          map[string]int
+	gDt           time.Time
+	gNamePrefix   string
+	gMaxThreads   int
+	gProgress     bool
+	gFiltered     bool
+	gIncremental  bool
+	gESLogURL     string
+	gSyncDates    map[string]time.Time
+	gSyncDatesMtx *sync.Mutex
 )
 
 var gDtMtx = &sync.Mutex{}
@@ -500,11 +504,58 @@ func applySlugMapping(slug string, useDAWhenNotFound bool) (daName, sfName strin
 	return
 }
 
+func getPatternIncrementalDate(key string) string {
+	// xxx
+	// return " and metadata__timestamp >= '2021-10-01T00:00:00'"
+	return ""
+}
+
+func savePatternIncrementalDate(key string, when time.Time) {
+	gSyncDatesMtx.Lock()
+	gSyncDates[key] = when
+	gSyncDatesMtx.Unlock()
+}
+
+func saveIncrementalDates(thrN int) {
+	fmt.Printf("saving %d sync dates status...\n", len(gSyncDates))
+	save := func(ch chan struct{}, key string, when time.Time) {
+		defer func() {
+			ch <- struct{}{}
+		}()
+		// xxx
+	}
+	ch := make(chan struct{})
+	nThreads := 0
+	for key, when := range gSyncDates {
+		go save(ch, key, when)
+		nThreads++
+		if nThreads == thrN {
+			<-ch
+			nThreads--
+		}
+	}
+	for nThreads > 0 {
+		<-ch
+		nThreads--
+	}
+	fmt.Printf("saved %d sync dates status\n", len(gSyncDates))
+}
+
 // subrep
 func datalakeLOCReportForRoot(root, projectSlug, sfSlug string, overrideProjectSlug, missingCol bool) (locItems []datalakeLOCReportItem, retry bool) {
 	if gDbg {
 		defer func() {
 			fmt.Printf("got LOC %s: %v\n", root, locItems)
+		}()
+	}
+	var fromCond string
+	if gIncremental {
+		key := root + ":git"
+		fromCond = getPatternIncrementalDate(key)
+		defer func() {
+			if !retry && len(locItems) > 0 {
+				savePatternIncrementalDate(key, time.Now().Add(time.Duration(-30)*time.Minute))
+			}
 		}()
 	}
 	pattern := jsonEscape("sds-" + root + "-git*,-*-github,-*-github-issue,-*-github-repository,-*-github-pull_request,-*-raw,-*-for-merge,-*-cache,-*-converted,-*-temp,-*-last-action-date-cache")
@@ -513,18 +564,20 @@ func datalakeLOCReportForRoot(root, projectSlug, sfSlug string, overrideProjectS
 	if missingCol {
 		data = fmt.Sprintf(
 			`{"query":"select git_uuid, author_id, '%s', %s, lines_added, lines_removed from \"%s\" `+
-				`where author_id is not null and type = 'commit' and (lines_added > 0 or lines_removed > 0)","fetch_size":%d}`,
+				`where author_id is not null and type = 'commit' and (lines_added > 0 or lines_removed > 0)%s","fetch_size":%d}`,
 			projectSlug,
 			cCreatedAtColumn,
 			pattern,
+			fromCond,
 			10000,
 		)
 	} else {
 		data = fmt.Sprintf(
 			`{"query":"select git_uuid, author_id, project_slug, %s, lines_added, lines_removed from \"%s\" `+
-				`where author_id is not null and type = 'commit' and (lines_added > 0 or lines_removed > 0)","fetch_size":%d}`,
+				`where author_id is not null and type = 'commit' and (lines_added > 0 or lines_removed > 0)%s","fetch_size":%d}`,
 			cCreatedAtColumn,
 			pattern,
+			fromCond,
 			10000,
 		)
 	}
@@ -656,24 +709,36 @@ func datalakeGithubPRReportForRoot(root, projectSlug, sfName string, overridePro
 			fmt.Printf("got github-pr %s: %v\n", root, prItems)
 		}()
 	}
+	var fromCond string
+	if gIncremental {
+		key := root + ":github-pulls"
+		fromCond = getPatternIncrementalDate(key)
+		defer func() {
+			if !retry && len(prItems) > 0 {
+				savePatternIncrementalDate(key, time.Now().Add(time.Duration(-30)*time.Minute))
+			}
+		}()
+	}
 	pattern := jsonEscape("sds-" + root + "-github-issue*,-*-raw,-*-for-merge,-*-cache,-*-converted,-*-temp,-*-last-action-date-cache")
 	method := "POST"
 	var data string
 	if missingCol {
 		data = fmt.Sprintf(
 			`{"query":"select id, author_id, '%s', %s, type, state, merged_by_data_id from \"%s\" `+
-				`where author_id is not null and is_github_pull_request = 1","fetch_size":%d}`,
+				`where author_id is not null and is_github_pull_request = 1%s","fetch_size":%d}`,
 			projectSlug,
 			cCreatedAtColumn,
 			pattern,
+			fromCond,
 			10000,
 		)
 	} else {
 		data = fmt.Sprintf(
 			`{"query":"select id, author_id, project_slug, %s, type, state, merged_by_data_id from \"%s\" `+
-				`where author_id is not null and is_github_pull_request = 1","fetch_size":%d}`,
+				`where author_id is not null and is_github_pull_request = 1%s","fetch_size":%d}`,
 			cCreatedAtColumn,
 			pattern,
+			fromCond,
 			10000,
 		)
 	}
@@ -821,24 +886,36 @@ func datalakeGerritReviewReportForRoot(root, projectSlug, sfName string, overrid
 			fmt.Printf("got gerrit-review %s: %v\n", root, prItems)
 		}()
 	}
+	var fromCond string
+	if gIncremental {
+		key := root + ":gerrit"
+		fromCond = getPatternIncrementalDate(key)
+		defer func() {
+			if !retry && len(prItems) > 0 {
+				savePatternIncrementalDate(key, time.Now().Add(time.Duration(-30)*time.Minute))
+			}
+		}()
+	}
 	pattern := jsonEscape("sds-" + root + "-gerrit*,-*-raw,-*-for-merge,-*-cache,-*-converted,-*-temp,-*-last-action-date-cache")
 	method := "POST"
 	var data string
 	if missingCol {
 		data = fmt.Sprintf(
 			`{"query":"select id, author_id, '%s', %s, type, approval_value from \"%s\" `+
-				`where author_id is not null","fetch_size":%d}`,
+				`where author_id is not null%s","fetch_size":%d}`,
 			projectSlug,
 			cCreatedAtColumn,
 			pattern,
+			fromCond,
 			10000,
 		)
 	} else {
 		data = fmt.Sprintf(
 			`{"query":"select id, author_id, project_slug, %s, type, approval_value from \"%s\" `+
-				`where author_id is not null","fetch_size":%d}`,
+				`where author_id is not null%s","fetch_size":%d}`,
 			cCreatedAtColumn,
 			pattern,
+			fromCond,
 			10000,
 		)
 	}
@@ -978,24 +1055,36 @@ func datalakeGithubIssueReportForRoot(root, projectSlug, sfName string, override
 			fmt.Printf("got github-issue %s: %v\n", root, issueItems)
 		}()
 	}
+	var fromCond string
+	if gIncremental {
+		key := root + ":github-issue"
+		fromCond = getPatternIncrementalDate(key)
+		defer func() {
+			if !retry && len(issueItems) > 0 {
+				savePatternIncrementalDate(key, time.Now().Add(time.Duration(-30)*time.Minute))
+			}
+		}()
+	}
 	pattern := jsonEscape("sds-" + root + "-github-issue*,-*-raw,-*-for-merge,-*-cache,-*-converted,-*-temp,-*-last-action-date-cache")
 	method := "POST"
 	var data string
 	if missingCol {
 		data = fmt.Sprintf(
 			`{"query":"select id, author_id, '%s', %s, type from \"%s\" `+
-				`where author_id is not null and is_github_issue = 1","fetch_size":%d}`,
+				`where author_id is not null and is_github_issue = 1%s","fetch_size":%d}`,
 			projectSlug,
 			cCreatedAtColumn,
 			pattern,
+			fromCond,
 			10000,
 		)
 	} else {
 		data = fmt.Sprintf(
 			`{"query":"select id, author_id, project_slug, %s, type from \"%s\" `+
-				`where author_id is not null and is_github_issue = 1","fetch_size":%d}`,
+				`where author_id is not null and is_github_issue = 1%s","fetch_size":%d}`,
 			cCreatedAtColumn,
 			pattern,
+			fromCond,
 			10000,
 		)
 	}
@@ -1124,6 +1213,16 @@ func datalakeJiraIssueReportForRoot(root, projectSlug, sfName string, overridePr
 			fmt.Printf("got jira issue %s: %v\n", root, issueItems)
 		}()
 	}
+	var fromCond string
+	if gIncremental {
+		key := root + ":jira"
+		fromCond = getPatternIncrementalDate(key)
+		defer func() {
+			if !retry && len(issueItems) > 0 {
+				savePatternIncrementalDate(key, time.Now().Add(time.Duration(-30)*time.Minute))
+			}
+		}()
+	}
 	// can also get status and/or status_category_key
 	pattern := jsonEscape("sds-" + root + "-jira*,-*-raw,-*-for-merge,-*-cache,-*-converted,-*-temp,-*-last-action-date-cache")
 	method := "POST"
@@ -1131,18 +1230,20 @@ func datalakeJiraIssueReportForRoot(root, projectSlug, sfName string, overridePr
 	if missingCol {
 		data = fmt.Sprintf(
 			`{"query":"select id, author_id, '%s', %s, type from \"%s\" `+
-				`where author_id is not null","fetch_size":%d}`,
+				`where author_id is not null%s","fetch_size":%d}`,
 			projectSlug,
 			cCreatedAtColumn,
 			pattern,
+			fromCond,
 			10000,
 		)
 	} else {
 		data = fmt.Sprintf(
 			`{"query":"select id, author_id, project_slug, %s, type from \"%s\" `+
-				`where author_id is not null","fetch_size":%d}`,
+				`where author_id is not null%s","fetch_size":%d}`,
 			cCreatedAtColumn,
 			pattern,
+			fromCond,
 			10000,
 		)
 	}
@@ -1275,6 +1376,19 @@ func datalakeBugzillaIssueReportForRoot(root, projectSlug, sfName string, overri
 			fmt.Printf("got %s issue %s: %v\n", ds, root, issueItems)
 		}()
 	}
+	var fromCond string
+	if gIncremental {
+		key := root + ":bugzilla"
+		if rest {
+			key += "rest"
+		}
+		fromCond = getPatternIncrementalDate(key)
+		defer func() {
+			if len(issueItems) > 0 {
+				savePatternIncrementalDate(key, time.Now().Add(time.Duration(-30)*time.Minute))
+			}
+		}()
+	}
 	pattern := jsonEscape("sds-" + root + "-" + ds + "*,-*-raw,-*-for-merge,-*-cache,-*-converted,-*-temp,-*-last-action-date-cache")
 	method := "POST"
 	// can also get status and/or status_category_key
@@ -1282,9 +1396,10 @@ func datalakeBugzillaIssueReportForRoot(root, projectSlug, sfName string, overri
 	var data string
 	data = fmt.Sprintf(
 		`{"query":"select uuid, author_id, %s, status from \"%s\" `+
-			`where author_id is not null","fetch_size":%d}`,
+			`where author_id is not null%s","fetch_size":%d}`,
 		cCreatedAtColumn,
 		pattern,
+		fromCond,
 		10000,
 	)
 	if gDbg {
@@ -1402,24 +1517,36 @@ func datalakeDocReportForRoot(root, projectSlug, sfName string, overrideProjectS
 			fmt.Printf("got docs %s: %v\n", root, docItems)
 		}()
 	}
+	var fromCond string
+	if gIncremental {
+		key := root + ":confluence"
+		fromCond = getPatternIncrementalDate(key)
+		defer func() {
+			if !retry && len(docItems) > 0 {
+				savePatternIncrementalDate(key, time.Now().Add(time.Duration(-30)*time.Minute))
+			}
+		}()
+	}
 	pattern := jsonEscape("sds-" + root + "-confluence*,-*-raw,-*-for-merge,-*-cache,-*-converted,-*-temp,-*-last-action-date-cache")
 	method := "POST"
 	var data string
 	if missingCol {
 		data = fmt.Sprintf(
 			`{"query":"select uuid, author_id, '%s', %s, type from \"%s\" `+
-				`where author_id is not null","fetch_size":%d}`,
+				`where author_id is not null%s","fetch_size":%d}`,
 			projectSlug,
 			cCreatedAtColumn,
 			pattern,
+			fromCond,
 			10000,
 		)
 	} else {
 		data = fmt.Sprintf(
 			`{"query":"select uuid, author_id, project_slug, %s, type from \"%s\" `+
-				`where author_id is not null","fetch_size":%d}`,
+				`where author_id is not null%s","fetch_size":%d}`,
 			cCreatedAtColumn,
 			pattern,
+			fromCond,
 			10000,
 		)
 	}
@@ -2656,6 +2783,9 @@ func genDatalakeReport(roots, dataSourceTypes []string) {
 	if bIssues {
 		saveDatalakeIssuesReport(report.issueItems)
 	}
+	if gIncremental {
+		saveIncrementalDates(thrN)
+	}
 }
 
 func setupSHDB() {
@@ -2726,7 +2856,16 @@ func setupEnvs() {
 		for _, sub := range ary {
 			gSubReport[strings.TrimSpace(sub)] = struct{}{}
 		}
-		gDbg = os.Getenv("FILTERED") != ""
+		gFiltered = os.Getenv("FILTERED") != ""
+		gIncremental = os.Getenv("INCREMENTAL") != ""
+		if gIncremental {
+			gESLogURL = os.Getenv("ES_LOG_URL")
+			if gESLogURL == "" {
+				fatal("ES_LOG_URL must be set when using incremental mode")
+			}
+			gSyncDates = map[string]time.Time{}
+			gSyncDatesMtx = &sync.Mutex{}
+		}
 	default:
 		fatal("unknown report type: " + gReport)
 	}
