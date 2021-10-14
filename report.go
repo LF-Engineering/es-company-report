@@ -872,7 +872,7 @@ func datalakeGithubPRReportForRoot(root, projectSlug, sfName string, overridePro
 				}
 			}
 			if identityID == mergeIdentityID {
-				actionType = "PR merged"
+				actionType = "GitHub PR merged"
 			}
 			item := datalakePRReportItem{
 				docID:       documentID,
