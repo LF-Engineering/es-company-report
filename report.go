@@ -2388,7 +2388,7 @@ func toPRType(inType string) string {
 	case "pull_request_review":
 		// should not happen - we're splitting this into separate approval states
 		return "GitHub PR review"
-	case "GitHub PR approved", "GitHub PR changes requested", "GitHub PR dismissed", "GitHub PR review comment", "PR merged", "Gerrit review rejected", "Gerrit review approved":
+	case "GitHub PR approved", "GitHub PR changes requested", "GitHub PR dismissed", "GitHub PR review comment", "GitHub PR merged", "Gerrit review rejected", "Gerrit review approved":
 		return inType
 	case "approval":
 		// should not happen - we're splitting this into separate approval states
