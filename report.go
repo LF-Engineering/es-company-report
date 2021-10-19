@@ -1212,7 +1212,7 @@ func datalakeGithubIssueReportForRoot(root, projectSlug, sfName string, override
 	if missingCol {
 		data = fmt.Sprintf(
 			`{"query":"select id, author_id, '%s', %s, type, pull_request from \"%s\" `+
-				`where author_id is not null and is_github_issue = 1%s","fetch_size":%d}`,
+				`where author_id is not null not (pull_request = true) and is_github_issue = 1%s","fetch_size":%d}`,
 			projectSlug,
 			cCreatedAtColumn,
 			pattern,
@@ -1222,7 +1222,7 @@ func datalakeGithubIssueReportForRoot(root, projectSlug, sfName string, override
 	} else {
 		data = fmt.Sprintf(
 			`{"query":"select id, author_id, project_slug, %s, type, pull_request from \"%s\" `+
-				`where author_id is not null and is_github_issue = 1%s","fetch_size":%d}`,
+				`where author_id is not null not (pull_request = true) and is_github_issue = 1%s","fetch_size":%d}`,
 			cCreatedAtColumn,
 			pattern,
 			fromCond,
