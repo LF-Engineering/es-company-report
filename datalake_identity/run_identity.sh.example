@@ -1,0 +1,16 @@
+#!/bin/bash
+
+export SH_DB_ENDPOINT=change-me
+export API_DB_ENDPOINT=change-me
+export AWS_ACCESS_KEY_ID=change-me
+export AWS_SECRET_ACCESS_KEY=change-me
+export AWS_REGION=change-me
+export AUTH0_AUDIENCE=change-me
+export AUTH0_CLIENT_ID=change-me
+export AUTH0_CLIENT_SECRET=change-me
+export AUTH0_GRANT_TYPE=change-me
+export ELASTIC_URL=change-me
+export ELASTIC_USERNAME=change-me
+export ELASTIC_PASSWORD=change-me
+
+./identity > /tmp/identity_daily_`date +%d_%m_%Y`

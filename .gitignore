@@ -20,3 +20,4 @@
 *.csv
 *.log
 out
+datalake_identity/run_identity.sh
