@@ -621,6 +621,14 @@ func datalakeLOCReportForRoot(root, projectSlug, sfSlug string, overrideProjectS
 		}()
 	}
 	pattern := jsonEscape("sds-" + root + "-git*,-*-github,-*-github-issue,-*-github-repository,-*-github-pull_request,-*-raw,-*-for-merge,-*-cache,-*-converted,-*-temp,-*-last-action-date-cache")
+	fields := getAllFields(pattern)
+	_, isGit := fields["gith_uuid"]
+	if !isGit {
+		if gDbg {
+			fmt.Printf("%s: has no git data\n", root)
+		}
+		return
+	}
 	method := "POST"
 	var data string
 	if missingCol {
@@ -967,6 +975,14 @@ func datalakeGerritReviewReportForRoot(root, projectSlug, sfName string, overrid
 		}()
 	}
 	pattern := jsonEscape("sds-" + root + "-gerrit*,-*-raw,-*-for-merge,-*-cache,-*-converted,-*-temp,-*-last-action-date-cache")
+	fields := getAllFields(pattern)
+	_, isGerrit := fields["type"]
+	if !isGerrit {
+		if gDbg {
+			fmt.Printf("%s: has no gerrit data\n", root)
+		}
+		return
+	}
 	method := "POST"
 	var data string
 	if missingCol {
@@ -1354,6 +1370,14 @@ func datalakeJiraIssueReportForRoot(root, projectSlug, sfName string, overridePr
 	}
 	// can also get status and/or status_category_key
 	pattern := jsonEscape("sds-" + root + "-jira*,-*-raw,-*-for-merge,-*-cache,-*-converted,-*-temp,-*-last-action-date-cache")
+	fields := getAllFields(pattern)
+	_, isJira := fields["type"]
+	if !isJira {
+		if gDbg {
+			fmt.Printf("%s: has no gerrit data\n", root)
+		}
+		return
+	}
 	method := "POST"
 	var data string
 	if missingCol {
@@ -1519,6 +1543,14 @@ func datalakeBugzillaIssueReportForRoot(root, projectSlug, sfName string, overri
 		}()
 	}
 	pattern := jsonEscape("sds-" + root + "-" + ds + "*,-*-raw,-*-for-merge,-*-cache,-*-converted,-*-temp,-*-last-action-date-cache")
+	fields := getAllFields(pattern)
+	_, isBugzilla := fields["author_id"]
+	if !isBugzilla {
+		if gDbg {
+			fmt.Printf("%s: has no gerrit data\n", root)
+		}
+		return
+	}
 	method := "POST"
 	// can also get status and/or status_category_key
 	// TODO: is uuid an unique document key in bugzilla?
@@ -1657,6 +1689,14 @@ func datalakeDocReportForRoot(root, projectSlug, sfName string, overrideProjectS
 		}()
 	}
 	pattern := jsonEscape("sds-" + root + "-confluence*,-*-raw,-*-for-merge,-*-cache,-*-converted,-*-temp,-*-last-action-date-cache")
+	fields := getAllFields(pattern)
+	_, isConfluence := fields["type"]
+	if !isConfluence {
+		if gDbg {
+			fmt.Printf("%s: has no gerrit data\n", root)
+		}
+		return
+	}
 	method := "POST"
 	var data string
 	if missingCol {
