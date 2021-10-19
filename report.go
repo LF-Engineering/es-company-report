@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/csv"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"net/http"
 	"os"
@@ -781,6 +782,12 @@ func datalakeGithubPRReportForRoot(root, projectSlug, sfName string, overridePro
 		}()
 	}
 	pattern := jsonEscape("sds-" + root + "-github-issue*,-*-raw,-*-for-merge,-*-cache,-*-converted,-*-temp,-*-last-action-date-cache")
+	fields := getAllFields(pattern)
+	_, isPR := fields["is_github_pull_request"]
+	if !isPR {
+		fmt.Printf("%s: has no github PRs data (probably only issues?)\n", root)
+		return
+	}
 	method := "POST"
 	var data string
 	if missingCol {
@@ -1109,6 +1116,53 @@ func datalakeGerritReviewReportForRoot(root, projectSlug, sfName string, overrid
 	return
 }
 
+// Top contributor functions
+func getAllFields(indexPattern string) (fields map[string]struct{}) {
+	fields = map[string]struct{}{}
+	data := fmt.Sprintf(`{"query":"show columns in \"%s\""}`, jsonEscape(indexPattern))
+	payloadBytes := []byte(data)
+	payloadBody := bytes.NewReader(payloadBytes)
+	method := "POST"
+	url := gESURL + "/_sql?format=csv"
+	req, err := http.NewRequest(method, url, payloadBody)
+	fatalError(err)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	fatalError(err)
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+	if resp.StatusCode != 200 {
+		var body []byte
+		body, err = ioutil.ReadAll(resp.Body)
+		if err != nil {
+			fatalError(fmt.Errorf("readAll non-ok request error: %+v for %s url: %s, data: %s", err, method, url, data))
+			return
+		}
+		fatalError(fmt.Errorf("method:%s url:%s data: %s status:%d\n%s", method, url, data, resp.StatusCode, body))
+		return
+	}
+	reader := csv.NewReader(resp.Body)
+	row := []string{}
+	n := 0
+	for {
+		row, err = reader.Read()
+		if err == io.EOF {
+			err = nil
+			break
+		} else if err != nil {
+			fatalError(fmt.Errorf("read CSV row #%d, error: %v/%T", n, err, err))
+			return
+		}
+		n++
+		// hash_short,VARCHAR,keyword
+		//if row[1] == "VARCHAR" && row[2] == "keyword" {
+		//}
+		fields[row[0]] = struct{}{}
+	}
+	return
+}
+
 // subrep
 func datalakeGithubIssueReportForRoot(root, projectSlug, sfName string, overrideProjectSlug, missingCol bool) (issueItems []datalakeIssueReportItem, retry bool) {
 	if gDbg {
@@ -1127,11 +1181,17 @@ func datalakeGithubIssueReportForRoot(root, projectSlug, sfName string, override
 		}()
 	}
 	pattern := jsonEscape("sds-" + root + "-github-issue*,-*-raw,-*-for-merge,-*-cache,-*-converted,-*-temp,-*-last-action-date-cache")
+	fields := getAllFields(pattern)
+	_, isIssue := fields["is_github_issue"]
+	if !isIssue {
+		fmt.Printf("%s: has no github issues data (probably only PRs?)\n", root)
+		return
+	}
 	method := "POST"
 	var data string
 	if missingCol {
 		data = fmt.Sprintf(
-			`{"query":"select id, author_id, '%s', %s, type from \"%s\" `+
+			`{"query":"select id, author_id, '%s', %s, type, pull_request from \"%s\" `+
 				`where author_id is not null and is_github_issue = 1%s","fetch_size":%d}`,
 			projectSlug,
 			cCreatedAtColumn,
@@ -1141,7 +1201,7 @@ func datalakeGithubIssueReportForRoot(root, projectSlug, sfName string, override
 		)
 	} else {
 		data = fmt.Sprintf(
-			`{"query":"select id, author_id, project_slug, %s, type from \"%s\" `+
+			`{"query":"select id, author_id, project_slug, %s, type, pull_request from \"%s\" `+
 				`where author_id is not null and is_github_issue = 1%s","fetch_size":%d}`,
 			cCreatedAtColumn,
 			pattern,
@@ -1201,6 +1261,10 @@ func datalakeGithubIssueReportForRoot(root, projectSlug, sfName string, override
 			}
 			createdAt, _ := timeParseES(row[3].(string))
 			actionType, _ := row[4].(string)
+			isPull, _ := row[5].(bool)
+			if isPull {
+				actionType = "pr_" + actionType
+			}
 			item := datalakeIssueReportItem{
 				docID:       documentID,
 				identityID:  identityID,
@@ -2360,6 +2424,16 @@ func toIssueType(inType string) string {
 		return "GitHub issue comment reaction"
 	case "issue_reaction":
 		return "GitHub issue reaction"
+	case "pr_issue":
+		return "GitHub PR created"
+	case "pr_issue_assignee":
+		return "GitHub PR assignment"
+	case "pr_issue_comment":
+		return "GitHub PR comment"
+	case "pr_issue_comment_reaction":
+		return "GitHub PR comment reaction"
+	case "pr_issue_reaction":
+		return "GitHub PR reaction"
 	case "jira_issue":
 		return "Jira issue created"
 	case "jira_comment":
