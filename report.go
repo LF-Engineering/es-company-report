@@ -622,7 +622,7 @@ func datalakeLOCReportForRoot(root, projectSlug, sfSlug string, overrideProjectS
 	}
 	pattern := jsonEscape("sds-" + root + "-git*,-*-github,-*-github-issue,-*-github-repository,-*-github-pull_request,-*-raw,-*-for-merge,-*-cache,-*-converted,-*-temp,-*-last-action-date-cache")
 	fields := getAllFields(pattern)
-	_, isGit := fields["gith_uuid"]
+	_, isGit := fields["git_uuid"]
 	if !isGit {
 		if gDbg {
 			fmt.Printf("%s: has no git data\n", root)
