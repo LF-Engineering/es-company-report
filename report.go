@@ -785,7 +785,9 @@ func datalakeGithubPRReportForRoot(root, projectSlug, sfName string, overridePro
 	fields := getAllFields(pattern)
 	_, isPR := fields["is_github_pull_request"]
 	if !isPR {
-		fmt.Printf("%s: has no github PRs data (probably only issues?)\n", root)
+		if gDbg {
+			fmt.Printf("%s: has no github PRs data (probably only issues?)\n", root)
+		}
 		return
 	}
 	method := "POST"
@@ -1184,7 +1186,9 @@ func datalakeGithubIssueReportForRoot(root, projectSlug, sfName string, override
 	fields := getAllFields(pattern)
 	_, isIssue := fields["is_github_issue"]
 	if !isIssue {
-		fmt.Printf("%s: has no github issues data (probably only PRs?)\n", root)
+		if gDbg {
+			fmt.Printf("%s: has no github issues data (probably only PRs?)\n", root)
+		}
 		return
 	}
 	method := "POST"
