@@ -3095,7 +3095,7 @@ func getIncorrectEmailDocs(ch chan [][3]string, index string, ids map[string]str
 
 func genIncorrectEmailsReport() {
 	// SH part
-	query := `select source, id, email from identities where email is not null and trim(email) != '' and email not regexp '^[a-zA-Z0-9.!#$%&*+\'\` +
+	query := `select source, id, email from identities where email is not null and trim(email) != '' and email not regexp '^[][a-zA-Z0-9.!#$%&*+\'\` +
 		"`" + `\/=?^_{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$'` +
 		`order by source, email`
 	rows, err := gDB.Query(query)
