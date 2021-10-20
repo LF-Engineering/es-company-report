@@ -2967,9 +2967,13 @@ func genDatalakeReport(roots, dataSourceTypes []string) {
 	}
 }
 
-func getIncorrectEmailDocs(ch chan [][3]string, index string, ids map[string]struct{}) {
+func getIncorrectEmailDocs(ch chan [][3]string, index string, ids map[string]string) {
 	docs := [][3]string{}
+	total := 0
 	defer func() {
+		if total > 0 {
+			fmt.Printf("%s: found %d documents\n", index, total)
+		}
 		ch <- docs
 	}()
 	fields := getAllFields(index)
@@ -2979,6 +2983,113 @@ func getIncorrectEmailDocs(ch chan [][3]string, index string, ids map[string]str
 			fmt.Printf("%s doesn't have author_id field, skipping\n", index)
 		}
 		return
+	}
+	var scroll *string
+	// Defer free scroll
+	defer func() {
+		if scroll == nil {
+			return
+		}
+		method := "DELETE"
+		data := `{"scroll_id":"` + *scroll + `"}`
+		payloadBytes := []byte(data)
+		payloadBody := bytes.NewReader(payloadBytes)
+		url := gESURL + "/_search/scroll"
+		req, err := http.NewRequest(method, url, payloadBody)
+		fatalError(err)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		fatalError(err)
+		body, err := ioutil.ReadAll(resp.Body)
+		fatalError(err)
+		_ = resp.Body.Close()
+		var result interface{}
+		err = jsoniter.Unmarshal(body, &result)
+		fatalError(err)
+		if resp.StatusCode != 200 {
+			fmt.Printf("%s free scroll error: status %d: %+v\n", index, resp.StatusCode, result)
+		}
+	}()
+	aIDs := "["
+	for aid := range ids {
+		aIDs += `"` + aid + `",`
+	}
+	aIDs = aIDs[:len(aIDs)-1] + "]"
+	method := "POST"
+	packs := 0
+	// Scroll search
+	for {
+		var (
+			url          string
+			payloadBytes []byte
+		)
+		if scroll == nil {
+			url = gESURL + "/" + index + "/_search?scroll=15m&size=1000"
+			payloadBytes = []byte(`{"query":{"bool":{"filter":{"terms":{"author_id":` + aIDs + `}}}}}`)
+		} else {
+			url = gESURL + "/_search/scroll"
+			payloadBytes = []byte(`{"scroll":"15m","scroll_id":"` + *scroll + `"}`)
+			packs++
+			if gDbg {
+				fmt.Printf("%s: using scroll #%d time\n", index, packs)
+			}
+		}
+		payloadBody := bytes.NewReader(payloadBytes)
+		req, err := http.NewRequest(method, url, payloadBody)
+		fatalError(err)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		fatalError(err)
+		if resp.StatusCode != 200 {
+			fatalError(fmt.Errorf("%s: status code: %d", index, resp.StatusCode))
+			return
+		}
+		body, err := ioutil.ReadAll(resp.Body)
+		fatalError(err)
+		_ = resp.Body.Close()
+		var res interface{}
+		err = jsoniter.Unmarshal(body, &res)
+		fatalError(err)
+		sScroll, ok := res.(map[string]interface{})["_scroll_id"].(string)
+		if !ok {
+			fatalError(fmt.Errorf("%s: missing _scroll_id in the response %+v", index, res))
+			return
+		}
+		scroll = &sScroll
+		items, ok := res.(map[string]interface{})["hits"].(map[string]interface{})["hits"].([]interface{})
+		if !ok {
+			fatalError(fmt.Errorf("%s: missing hits.hits in the response %+v", index, res))
+			return
+		}
+		nItems := len(items)
+		if nItems == 0 {
+			break
+		}
+		for _, iitem := range items {
+			item, ok := iitem.(map[string]interface{})
+			if !ok {
+				fmt.Printf("%s: incorrect row (non interface): %+v\n", index, iitem)
+				continue
+			}
+			source, ok := item["_source"].(map[string]interface{})
+			if !ok {
+				fmt.Printf("%s: incorrect row (no _source): %+v\n", index, item)
+				continue
+			}
+			id, _ := item["_id"].(string)
+			idx, _ := item["_index"].(string)
+			aid, _ := source["author_id"].(string)
+			if id == "" || idx == "" || aid == "" {
+				fmt.Printf("%s: incorrect row (no _index, _id or author_id): %+v\n", index, item)
+				continue
+			}
+			doc := [3]string{idx, aid, id}
+			if gDbg {
+				fmt.Printf("%s: %+v\n", index, doc)
+			}
+			docs = append(docs, doc)
+			total++
+		}
 	}
 }
 
@@ -2994,12 +3105,12 @@ func genIncorrectEmailsReport() {
 		source string
 		email  string
 	)
-	ids := map[string]struct{}{}
+	ids := map[string]string{}
 	data := map[[2]string]struct{}{}
 	for rows.Next() {
 		err = rows.Scan(&source, &id, &email)
 		fatalError(err)
-		ids[id] = struct{}{}
+		ids[id] = email
 		data[[2]string{source, email}] = struct{}{}
 	}
 	fatalError(rows.Err())
@@ -3074,10 +3185,30 @@ func genIncorrectEmailsReport() {
 			docs = append(docs, item)
 		}
 	}
-	// xxx
-	for i, doc := range docs {
-		fmt.Printf("%d) %+v\n", i+1, doc)
+	sort.Slice(
+		docs,
+		func(i, j int) bool {
+			if docs[i][0] == docs[j][0] {
+				if docs[i][1] == docs[j][1] {
+					return docs[i][2] < docs[j][2]
+				}
+				return docs[i][1] < docs[j][1]
+			}
+			return docs[i][0] < docs[j][0]
+		},
+	)
+	fn = "incorrect_docs.csv"
+	file, err = os.Create(fn)
+	fatalError(err)
+	defer func() { _ = file.Close() }()
+	writer = csv.NewWriter(file)
+	defer writer.Flush()
+	fatalError(writer.Write([]string{"index", "author ID", "document ID", "email"}))
+	for _, row := range docs {
+		email, _ = ids[row[1]]
+		fatalError(writer.Write([]string{row[0], row[1], row[2], email}))
 	}
+	fmt.Printf("%s saved\n", fn)
 	// All at once - impossible due to incompatible mappings, can be possible on smaller patterns
 	/*
 		pattern := jsonEscape("sds-*,-*-raw,-*-for-merge,-*-cache,-*-converted,-*-temp,-*-last-action-date-cache")
