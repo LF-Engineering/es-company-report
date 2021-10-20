@@ -2967,6 +2967,155 @@ func genDatalakeReport(roots, dataSourceTypes []string) {
 	}
 }
 
+func getIncorrectEmailDocs(ch chan [][3]string, index string, ids map[string]struct{}) {
+	docs := [][3]string{}
+	defer func() {
+		ch <- docs
+	}()
+	fields := getAllFields(index)
+	_, hasAid := fields["author_id"]
+	if !hasAid {
+		if gDbg {
+			fmt.Printf("%s doesn't have author_id field, skipping\n", index)
+		}
+		return
+	}
+}
+
+func genIncorrectEmailsReport() {
+	// SH part
+	query := `select source, id, email from identities where email is not null and trim(email) != '' and email not regexp '^[a-zA-Z0-9.!#$%&*+\'\` +
+		"`" + `\/=?^_{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$'` +
+		`order by source, email`
+	rows, err := gDB.Query(query)
+	fatalError(err)
+	var (
+		id     string
+		source string
+		email  string
+	)
+	ids := map[string]struct{}{}
+	data := map[[2]string]struct{}{}
+	for rows.Next() {
+		err = rows.Scan(&source, &id, &email)
+		fatalError(err)
+		ids[id] = struct{}{}
+		data[[2]string{source, email}] = struct{}{}
+	}
+	fatalError(rows.Err())
+	fatalError(rows.Close())
+	rrows := [][2]string{}
+	for row := range data {
+		rrows = append(rrows, row)
+	}
+	sort.Slice(
+		rrows,
+		func(i, j int) bool {
+			if rrows[i][0] == rrows[j][0] {
+				return rrows[i][1] < rrows[j][1]
+			}
+			return rrows[i][0] < rrows[j][0]
+		},
+	)
+	var writer *csv.Writer
+	fn := "incorrect_emails.csv"
+	file, err := os.Create(fn)
+	fatalError(err)
+	defer func() { _ = file.Close() }()
+	writer = csv.NewWriter(file)
+	defer writer.Flush()
+	fatalError(writer.Write([]string{"source", "incorrect email"}))
+	for _, row := range rrows {
+		fatalError(writer.Write([]string{row[0], row[1]}))
+	}
+	fmt.Printf("%s saved\n", fn)
+	// ES part
+	// Get all SDS indices
+	method := "GET"
+	url := gESURL + "/_cat/indices?format=json"
+	req, err := http.NewRequest(method, url, nil)
+	fatalError(err)
+	resp, err := http.DefaultClient.Do(req)
+	fatalError(err)
+	body, err := ioutil.ReadAll(resp.Body)
+	fatalError(err)
+	_ = resp.Body.Close()
+	body = append([]byte(`{"x":`), body...)
+	body = append(body, []byte(`}`)...)
+	var result map[string]interface{}
+	err = jsoniter.Unmarshal(body, &result)
+	fatalError(err)
+	indices := getIndices(result, false)
+	// Process them in parallel
+	thrN := runtime.NumCPU()
+	if gMaxThreads > 0 && thrN > gMaxThreads {
+		thrN = gMaxThreads
+	}
+	runtime.GOMAXPROCS(thrN)
+	fmt.Printf("Checking %d indices for %d incorrect emails using %d threads\n", len(indices), len(ids), thrN)
+	ch := make(chan [][3]string)
+	docs := [][3]string{}
+	nThreads := 0
+	for _, idx := range indices {
+		go getIncorrectEmailDocs(ch, idx, ids)
+		nThreads++
+		if nThreads == thrN {
+			items := <-ch
+			nThreads--
+			for _, item := range items {
+				docs = append(docs, item)
+			}
+		}
+	}
+	for nThreads > 0 {
+		items := <-ch
+		nThreads--
+		for _, item := range items {
+			docs = append(docs, item)
+		}
+	}
+	// xxx
+	for i, doc := range docs {
+		fmt.Printf("%d) %+v\n", i+1, doc)
+	}
+	// All at once - impossible due to incompatible mappings, can be possible on smaller patterns
+	/*
+		pattern := jsonEscape("sds-*,-*-raw,-*-for-merge,-*-cache,-*-converted,-*-temp,-*-last-action-date-cache")
+		fields := getAllFields(pattern)
+		method := "POST"
+		query = `{"query":"select `
+		for field := range fields {
+			query += `\"` + field + `\", `
+		}
+		query = query[:len(query)-2] + ` from \"` + pattern + `\" where author_id in (`
+		for id := range ids {
+			query += `'` + id + `', `
+		}
+		query = query[:len(query)-2] + `)","fetch_size":10000}`
+		if gDbg {
+			fmt.Printf("%s:%s\n", pattern, query)
+		}
+		payloadBytes := []byte(query)
+		payloadBody := bytes.NewReader(payloadBytes)
+		url := gESURL + "/_sql?format=json"
+		req, err := http.NewRequest(method, url, payloadBody)
+		fatalError(err)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		fatalError(err)
+		body, err := ioutil.ReadAll(resp.Body)
+		fatalError(err)
+		_ = resp.Body.Close()
+		var result resultType
+		err = jsoniter.Unmarshal(body, &result)
+		fatalError(err)
+		if result.Error.Type != "" || result.Error.Reason != "" {
+			fmt.Printf("genIncorrectEmailsReport: error for %s: %v\n", pattern, result.Error)
+			return
+		}
+	*/
+}
+
 func setupSHDB() {
 	dbURL := os.Getenv("DB_URL")
 	if dbURL == "" {
@@ -3002,7 +3151,8 @@ func setupEnvs() {
 	}
 	sMaxThreads := os.Getenv("MAX_THREADS")
 	if sMaxThreads != "" {
-		gMaxThreads, err := strconv.Atoi(sMaxThreads)
+		var err error
+		gMaxThreads, err = strconv.Atoi(sMaxThreads)
 		fatalError(err)
 		if gMaxThreads < 0 {
 			gMaxThreads = 0
@@ -3045,6 +3195,7 @@ func setupEnvs() {
 			gSyncDates = map[string]time.Time{}
 			gSyncDatesMtx = &sync.Mutex{}
 		}
+	case "incorrect-emails":
 	default:
 		fatal("unknown report type: " + gReport)
 	}
@@ -3060,5 +3211,7 @@ func main() {
 		genOrgReport(getSlugRoots())
 	case "datalake":
 		genDatalakeReport(getSlugRoots())
+	case "incorrect-emails":
+		genIncorrectEmailsReport()
 	}
 }
