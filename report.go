@@ -219,7 +219,7 @@ func getIndices(res map[string]interface{}, aliases bool) (indices []string) {
 		// to limit data processing while implementing
 		// yyy
 		// xxx
-		if !strings.Contains(idx, "prometheus") {
+		if !strings.Contains(idx, "grpc") {
 			continue
 		}
 		if !aliases {
@@ -1027,23 +1027,35 @@ func datalakeGerritReviewReportForRoot(root, projectSlug, sfName string, overrid
 		}
 		return
 	}
+	appendCols := ""
+	extraCols := []string{"summary", "url"}
+	for _, extraCol := range extraCols {
+		_, present := fields[extraCol]
+		if present {
+			appendCols += `, \"` + extraCol + `\"`
+		} else {
+			appendCols += `, ''`
+		}
+	}
 	method := "POST"
 	var data string
 	if missingCol {
 		data = fmt.Sprintf(
-			`{"query":"select id, author_id, '%s', %s, type, approval_value from \"%s\" `+
+			`{"query":"select id, author_id, '%s', %s, type, approval_value%s from \"%s\" `+
 				`where author_id is not null%s","fetch_size":%d}`,
 			projectSlug,
 			cCreatedAtColumn,
+			appendCols,
 			pattern,
 			fromCond,
 			10000,
 		)
 	} else {
 		data = fmt.Sprintf(
-			`{"query":"select id, author_id, project_slug, %s, type, approval_value from \"%s\" `+
+			`{"query":"select id, author_id, project_slug, %s, type, approval_value%s from \"%s\" `+
 				`where author_id is not null%s","fetch_size":%d}`,
 			cCreatedAtColumn,
+			appendCols,
 			pattern,
 			fromCond,
 			10000,
@@ -1112,6 +1124,8 @@ func datalakeGerritReviewReportForRoot(root, projectSlug, sfName string, overrid
 					actionType = "Gerrit review approved"
 				}
 			}
+			summary, _ := row[6].(string)
+			url, _ := row[7].(string)
 			item := datalakePRReportItem{
 				docID:       documentID,
 				identityID:  identityID,
@@ -1120,6 +1134,8 @@ func datalakeGerritReviewReportForRoot(root, projectSlug, sfName string, overrid
 				sfSlug:      sfName,
 				createdAt:   createdAt,
 				actionType:  actionType,
+				title:       summary,
+				url:         url,
 				filtered:    false,
 			}
 			prItems = append(prItems, item)
@@ -1251,23 +1267,35 @@ func datalakeGithubIssueReportForRoot(root, projectSlug, sfName string, override
 		}
 		return
 	}
+	appendCols := ""
+	extraCols := []string{"title", "url", "html_url"}
+	for _, extraCol := range extraCols {
+		_, present := fields[extraCol]
+		if present {
+			appendCols += `, \"` + extraCol + `\"`
+		} else {
+			appendCols += `, ''`
+		}
+	}
 	method := "POST"
 	var data string
 	if missingCol {
 		data = fmt.Sprintf(
-			`{"query":"select id, author_id, '%s', %s, type, pull_request from \"%s\" `+
+			`{"query":"select id, author_id, '%s', %s, type, pull_request%s from \"%s\" `+
 				`where author_id is not null and not (pull_request = true) and is_github_issue = 1%s","fetch_size":%d}`,
 			projectSlug,
 			cCreatedAtColumn,
+			appendCols,
 			pattern,
 			fromCond,
 			10000,
 		)
 	} else {
 		data = fmt.Sprintf(
-			`{"query":"select id, author_id, project_slug, %s, type, pull_request from \"%s\" `+
+			`{"query":"select id, author_id, project_slug, %s, type, pull_request%s from \"%s\" `+
 				`where author_id is not null and not (pull_request = true) and is_github_issue = 1%s","fetch_size":%d}`,
 			cCreatedAtColumn,
+			appendCols,
 			pattern,
 			fromCond,
 			10000,
@@ -1329,6 +1357,13 @@ func datalakeGithubIssueReportForRoot(root, projectSlug, sfName string, override
 			if isPull {
 				actionType = "pr_" + actionType
 			}
+			title, _ := row[6].(string)
+			var url string
+			if actionType == "issue" {
+				url, _ = row[7].(string)
+			} else {
+				url, _ = row[8].(string)
+			}
 			item := datalakeIssueReportItem{
 				docID:       documentID,
 				identityID:  identityID,
@@ -1337,6 +1372,8 @@ func datalakeGithubIssueReportForRoot(root, projectSlug, sfName string, override
 				sfSlug:      sfName,
 				createdAt:   createdAt,
 				actionType:  actionType,
+				title:       title,
+				url:         url,
 				filtered:    false,
 			}
 			issueItems = append(issueItems, item)
@@ -2633,6 +2670,8 @@ func saveDatalakeIssuesReport(report []datalakeIssueReportItem) {
 			item.sfSlug,
 			toYMDHMSDate(item.createdAt),
 			toIssueType(item.actionType),
+			item.title,
+			item.url,
 		}
 		if gFiltered {
 			row = append(row, filtered)
@@ -2653,9 +2692,9 @@ func saveDatalakeIssuesReport(report []datalakeIssueReportItem) {
 	writer = csv.NewWriter(file)
 	defer writer.Flush()
 	if gFiltered {
-		fatalError(writer.Write([]string{"document_id", "identity_id", "datasource", "insights_project_slug", "project_slug", "created_at", "type", "filtered"}))
+		fatalError(writer.Write([]string{"document_id", "identity_id", "datasource", "insights_project_slug", "project_slug", "created_at", "type", "title", "url", "filtered"}))
 	} else {
-		fatalError(writer.Write([]string{"document_id", "identity_id", "datasource", "insights_project_slug", "project_slug", "created_at", "type"}))
+		fatalError(writer.Write([]string{"document_id", "identity_id", "datasource", "insights_project_slug", "project_slug", "created_at", "type", "title", "url"}))
 	}
 	for _, row := range rows {
 		fatalError(writer.Write(row))
@@ -2697,6 +2736,8 @@ func saveDatalakeDocsReport(report []datalakeDocReportItem) {
 			item.sfSlug,
 			toYMDHMSDate(item.createdAt),
 			toDocType(item.actionType),
+			item.title,
+			item.url,
 		}
 		if gFiltered {
 			row = append(row, filtered)
@@ -2717,9 +2758,9 @@ func saveDatalakeDocsReport(report []datalakeDocReportItem) {
 	writer = csv.NewWriter(file)
 	defer writer.Flush()
 	if gFiltered {
-		fatalError(writer.Write([]string{"document_id", "identity_id", "datasource", "insights_project_slug", "project_slug", "created_at", "type", "filtered"}))
+		fatalError(writer.Write([]string{"document_id", "identity_id", "datasource", "insights_project_slug", "project_slug", "created_at", "type", "title", "url", "filtered"}))
 	} else {
-		fatalError(writer.Write([]string{"document_id", "identity_id", "datasource", "insights_project_slug", "project_slug", "created_at", "type"}))
+		fatalError(writer.Write([]string{"document_id", "identity_id", "datasource", "insights_project_slug", "project_slug", "created_at", "type", "title", "url"}))
 	}
 	for _, row := range rows {
 		fatalError(writer.Write(row))
