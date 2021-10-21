@@ -219,7 +219,7 @@ func getIndices(res map[string]interface{}, aliases bool) (indices []string) {
 		// to limit data processing while implementing
 		// yyy
 		// xxx
-		if !strings.Contains(idx, "grpc") {
+		if !strings.Contains(idx, "hyperledger") {
 			continue
 		}
 		if !aliases {
@@ -923,15 +923,15 @@ func datalakeGithubPRReportForRoot(root, projectSlug, sfName string, overridePro
 					actionType = "GitHub PR dismissed"
 				}
 			}
-			if identityID == mergeIdentityID {
-				actionType = "GitHub PR merged"
-			}
 			title, _ := row[7].(string)
 			var url string
 			if actionType == "pull_request" {
 				url, _ = row[8].(string)
 			} else {
 				url, _ = row[9].(string)
+			}
+			if identityID == mergeIdentityID {
+				actionType = "GitHub PR merged"
 			}
 			item := datalakePRReportItem{
 				docID:       documentID,
@@ -1459,23 +1459,35 @@ func datalakeJiraIssueReportForRoot(root, projectSlug, sfName string, overridePr
 		}
 		return
 	}
+	appendCols := ""
+	extraCols := []string{"summary", "url", "issue_url"}
+	for _, extraCol := range extraCols {
+		_, present := fields[extraCol]
+		if present {
+			appendCols += `, \"` + extraCol + `\"`
+		} else {
+			appendCols += `, ''`
+		}
+	}
 	method := "POST"
 	var data string
 	if missingCol {
 		data = fmt.Sprintf(
-			`{"query":"select id, author_id, '%s', %s, type from \"%s\" `+
+			`{"query":"select id, author_id, '%s', %s, type%s from \"%s\" `+
 				`where author_id is not null%s","fetch_size":%d}`,
 			projectSlug,
 			cCreatedAtColumn,
+			appendCols,
 			pattern,
 			fromCond,
 			10000,
 		)
 	} else {
 		data = fmt.Sprintf(
-			`{"query":"select id, author_id, project_slug, %s, type from \"%s\" `+
+			`{"query":"select id, author_id, project_slug, %s, type%s from \"%s\" `+
 				`where author_id is not null%s","fetch_size":%d}`,
 			cCreatedAtColumn,
+			appendCols,
 			pattern,
 			fromCond,
 			10000,
@@ -1533,6 +1545,13 @@ func datalakeJiraIssueReportForRoot(root, projectSlug, sfName string, overridePr
 			createdAt, _ := timeParseES(row[3].(string))
 			actionType, _ := row[4].(string)
 			// status, _ := row[5].(string)
+			summary, _ := row[5].(string)
+			var url string
+			if actionType == "issue" {
+				url, _ = row[6].(string)
+			} else {
+				url, _ = row[7].(string)
+			}
 			item := datalakeIssueReportItem{
 				docID:       documentID,
 				identityID:  identityID,
@@ -1541,6 +1560,8 @@ func datalakeJiraIssueReportForRoot(root, projectSlug, sfName string, overridePr
 				sfSlug:      sfName,
 				createdAt:   createdAt,
 				actionType:  "jira_" + actionType,
+				title:       summary,
+				url:         url,
 				filtered:    false,
 			}
 			issueItems = append(issueItems, item)
