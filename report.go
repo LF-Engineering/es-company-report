@@ -87,6 +87,8 @@ type datalakeLOCReportItem struct {
 	createdAt   time.Time
 	locAdded    int
 	locDeleted  int
+	title       string
+	url         string
 	filtered    bool
 }
 
@@ -100,6 +102,8 @@ type datalakeDocReportItem struct {
 	sfSlug      string
 	createdAt   time.Time
 	actionType  string // page, new_page, comment, attachment
+	title       string
+	url         string
 	filtered    bool
 }
 
@@ -113,6 +117,8 @@ type datalakePRReportItem struct {
 	sfSlug      string
 	createdAt   time.Time
 	actionType  string // all possible doc types from github-issue (PRs only) and gerrit, also detecting approvals/rejections/merges
+	title       string
+	url         string
 	filtered    bool
 }
 
@@ -126,6 +132,8 @@ type datalakeIssueReportItem struct {
 	sfSlug      string
 	createdAt   time.Time
 	actionType  string // all possible doc types from github-issue (Issue only), Jira & Bugzilla(rest)
+	title       string
+	url         string
 	filtered    bool
 }
 
@@ -629,23 +637,35 @@ func datalakeLOCReportForRoot(root, projectSlug, sfSlug string, overrideProjectS
 		}
 		return
 	}
+	appendCols := ""
+	extraCols := []string{"title", "commit_url"}
+	for _, extraCol := range extraCols {
+		_, present := fields[extraCol]
+		if present {
+			appendCols += `, \"` + extraCol + `\"`
+		} else {
+			appendCols += `, ''`
+		}
+	}
 	method := "POST"
 	var data string
 	if missingCol {
 		data = fmt.Sprintf(
-			`{"query":"select git_uuid, author_id, '%s', %s, lines_added, lines_removed from \"%s\" `+
+			`{"query":"select git_uuid, author_id, '%s', %s, lines_added, lines_removed%s from \"%s\" `+
 				`where author_id is not null and type = 'commit' and (lines_added > 0 or lines_removed > 0)%s","fetch_size":%d}`,
 			projectSlug,
 			cCreatedAtColumn,
+			appendCols,
 			pattern,
 			fromCond,
 			10000,
 		)
 	} else {
 		data = fmt.Sprintf(
-			`{"query":"select git_uuid, author_id, project_slug, %s, lines_added, lines_removed from \"%s\" `+
+			`{"query":"select git_uuid, author_id, project_slug, %s, lines_added, lines_removed%s from \"%s\" `+
 				`where author_id is not null and type = 'commit' and (lines_added > 0 or lines_removed > 0)%s","fetch_size":%d}`,
 			cCreatedAtColumn,
+			appendCols,
 			pattern,
 			fromCond,
 			10000,
@@ -705,6 +725,8 @@ func datalakeLOCReportForRoot(root, projectSlug, sfSlug string, overrideProjectS
 			locAdded := int(fLOCAdded)
 			fLOCDeleted, _ := row[5].(float64)
 			locDeleted := int(fLOCDeleted)
+			title, _ := row[6].(string)
+			url, _ := row[7].(string)
 			item := datalakeLOCReportItem{
 				docID:       documentID,
 				identityID:  identityID,
@@ -714,6 +736,8 @@ func datalakeLOCReportForRoot(root, projectSlug, sfSlug string, overrideProjectS
 				createdAt:   createdAt,
 				locAdded:    locAdded,
 				locDeleted:  locDeleted,
+				title:       title,
+				url:         url,
 				filtered:    false,
 			}
 			locItems = append(locItems, item)
@@ -2426,6 +2450,8 @@ func saveDatalakeLOCReport(report []datalakeLOCReportItem) {
 			toYMDHMSDate(item.createdAt),
 			strconv.Itoa(item.locAdded),
 			strconv.Itoa(item.locDeleted),
+			item.title,
+			item.url,
 		}
 		if gFiltered {
 			row = append(row, filtered)
@@ -2446,9 +2472,9 @@ func saveDatalakeLOCReport(report []datalakeLOCReportItem) {
 	writer = csv.NewWriter(file)
 	defer writer.Flush()
 	if gFiltered {
-		fatalError(writer.Write([]string{"document_id", "identity_id", "datasource", "insights_project_slug", "project_slug", "created_at", "loc_added", "loc_deleted", "filtered"}))
+		fatalError(writer.Write([]string{"document_id", "identity_id", "datasource", "insights_project_slug", "project_slug", "created_at", "loc_added", "loc_deleted", "title", "url", "filtered"}))
 	} else {
-		fatalError(writer.Write([]string{"document_id", "identity_id", "datasource", "insights_project_slug", "project_slug", "created_at", "loc_added", "loc_deleted"}))
+		fatalError(writer.Write([]string{"document_id", "identity_id", "datasource", "insights_project_slug", "project_slug", "created_at", "loc_added", "loc_deleted", "title", "url"}))
 	}
 	for _, row := range rows {
 		fatalError(writer.Write(row))
