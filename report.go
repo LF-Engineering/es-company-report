@@ -219,7 +219,7 @@ func getIndices(res map[string]interface{}, aliases bool) (indices []string) {
 		// to limit data processing while implementing
 		// yyy
 		// xxx
-		if !strings.Contains(idx, "hyperledger") {
+		if !strings.Contains(idx, "data-plane-development-kit") {
 			continue
 		}
 		if !aliases {
@@ -1653,14 +1653,25 @@ func datalakeBugzillaIssueReportForRoot(root, projectSlug, sfName string, overri
 		}
 		return
 	}
+	appendCols := ""
+	extraCols := []string{"main_description", "url"}
+	for _, extraCol := range extraCols {
+		_, present := fields[extraCol]
+		if present {
+			appendCols += `, \"` + extraCol + `\"`
+		} else {
+			appendCols += `, ''`
+		}
+	}
 	method := "POST"
 	// can also get status and/or status_category_key
 	// TODO: is uuid an unique document key in bugzilla?
 	var data string
 	data = fmt.Sprintf(
-		`{"query":"select uuid, author_id, %s, status from \"%s\" `+
+		`{"query":"select uuid, author_id, %s, status%s from \"%s\" `+
 			`where author_id is not null%s","fetch_size":%d}`,
 		cCreatedAtColumn,
+		appendCols,
 		pattern,
 		fromCond,
 		10000,
@@ -1707,6 +1718,12 @@ func datalakeBugzillaIssueReportForRoot(root, projectSlug, sfName string, overri
 			}
 			createdAt, _ := timeParseES(row[2].(string))
 			status, _ := row[3].(string)
+			desc, _ := row[4].(string)
+			ary := strings.Split(desc, "\n")
+			if len(ary) > 1 {
+				desc = ary[0]
+			}
+			url, _ := row[5].(string)
 			item := datalakeIssueReportItem{
 				docID:       documentID,
 				identityID:  identityID,
@@ -1715,6 +1732,8 @@ func datalakeBugzillaIssueReportForRoot(root, projectSlug, sfName string, overri
 				sfSlug:      sfName,
 				createdAt:   createdAt,
 				actionType:  "bugzilla:" + status,
+				title:       desc,
+				url:         url,
 				filtered:    false,
 			}
 			issueItems = append(issueItems, item)
