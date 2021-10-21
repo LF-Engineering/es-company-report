@@ -218,10 +218,11 @@ func getIndices(res map[string]interface{}, aliases bool) (indices []string) {
 		}
 		// to limit data processing while implementing
 		// yyy
-		// xxx
-		if !strings.Contains(idx, "data-plane-development-kit") {
-			continue
-		}
+		/*
+			if !strings.Contains(idx, "onap") {
+				continue
+			}
+		*/
 		if !aliases {
 			sCnt, _ := item["docs.count"].(string)
 			cnt, _ := strconv.Atoi(sCnt)
@@ -1818,23 +1819,36 @@ func datalakeDocReportForRoot(root, projectSlug, sfName string, overrideProjectS
 		}
 		return
 	}
+	appendCols := ""
+	// We have both content_url and url fields, but content_url seems to point to the right (possibly past) version from exact activity date
+	extraCols := []string{"title", "content_url"}
+	for _, extraCol := range extraCols {
+		_, present := fields[extraCol]
+		if present {
+			appendCols += `, \"` + extraCol + `\"`
+		} else {
+			appendCols += `, ''`
+		}
+	}
 	method := "POST"
 	var data string
 	if missingCol {
 		data = fmt.Sprintf(
-			`{"query":"select uuid, author_id, '%s', %s, type from \"%s\" `+
+			`{"query":"select uuid, author_id, '%s', %s, type%s from \"%s\" `+
 				`where author_id is not null%s","fetch_size":%d}`,
 			projectSlug,
 			cCreatedAtColumn,
+			appendCols,
 			pattern,
 			fromCond,
 			10000,
 		)
 	} else {
 		data = fmt.Sprintf(
-			`{"query":"select uuid, author_id, project_slug, %s, type from \"%s\" `+
+			`{"query":"select uuid, author_id, project_slug, %s, type%s from \"%s\" `+
 				`where author_id is not null%s","fetch_size":%d}`,
 			cCreatedAtColumn,
+			appendCols,
 			pattern,
 			fromCond,
 			10000,
@@ -1891,6 +1905,8 @@ func datalakeDocReportForRoot(root, projectSlug, sfName string, overrideProjectS
 			}
 			createdAt, _ := timeParseES(row[3].(string))
 			actionType, _ := row[4].(string)
+			title, _ := row[5].(string)
+			url, _ := row[6].(string)
 			item := datalakeDocReportItem{
 				docID:       documentID,
 				identityID:  identityID,
@@ -1899,6 +1915,8 @@ func datalakeDocReportForRoot(root, projectSlug, sfName string, overrideProjectS
 				sfSlug:      sfName,
 				createdAt:   createdAt,
 				actionType:  actionType,
+				title:       title,
+				url:         url,
 				filtered:    false,
 			}
 			docItems = append(docItems, item)
