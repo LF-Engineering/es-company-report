@@ -562,7 +562,7 @@ func savePatternIncrementalDate(key string, when time.Time) {
 }
 
 func saveIncrementalDates(thrN int) {
-	fmt.Printf("saving %d sync dates status...\n", len(gSyncDates))
+	fmt.Printf("saving %d sync dates status using %d threads...\n", len(gSyncDates), thrN)
 	type docType struct {
 		Dt  time.Time `json:"dt"`
 		Key string    `json:"key"`
