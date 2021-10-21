@@ -22,3 +22,6 @@
 out
 datalake_identity/run_identity.sh
 columns.txt
+datalake_identity/identity
+datalake_identity/identity.err
+pushS3.sh
