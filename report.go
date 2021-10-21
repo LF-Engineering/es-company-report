@@ -218,11 +218,10 @@ func getIndices(res map[string]interface{}, aliases bool) (indices []string) {
 		}
 		// to limit data processing while implementing
 		// yyy
-		/*
-			if !strings.Contains(idx, "prometheus") {
-				continue
-			}
-		*/
+		// xxx
+		if !strings.Contains(idx, "prometheus") {
+			continue
+		}
 		if !aliases {
 			sCnt, _ := item["docs.count"].(string)
 			cnt, _ := strconv.Atoi(sCnt)
@@ -822,23 +821,35 @@ func datalakeGithubPRReportForRoot(root, projectSlug, sfName string, overridePro
 		}
 		return
 	}
+	appendCols := ""
+	extraCols := []string{"title", "url", "html_url"}
+	for _, extraCol := range extraCols {
+		_, present := fields[extraCol]
+		if present {
+			appendCols += `, \"` + extraCol + `\"`
+		} else {
+			appendCols += `, ''`
+		}
+	}
 	method := "POST"
 	var data string
 	if missingCol {
 		data = fmt.Sprintf(
-			`{"query":"select id, author_id, '%s', %s, type, state, merged_by_data_id from \"%s\" `+
+			`{"query":"select id, author_id, '%s', %s, type, state, merged_by_data_id%s from \"%s\" `+
 				`where author_id is not null and is_github_pull_request = 1%s","fetch_size":%d}`,
 			projectSlug,
 			cCreatedAtColumn,
+			appendCols,
 			pattern,
 			fromCond,
 			10000,
 		)
 	} else {
 		data = fmt.Sprintf(
-			`{"query":"select id, author_id, project_slug, %s, type, state, merged_by_data_id from \"%s\" `+
+			`{"query":"select id, author_id, project_slug, %s, type, state, merged_by_data_id%s from \"%s\" `+
 				`where author_id is not null and is_github_pull_request = 1%s","fetch_size":%d}`,
 			cCreatedAtColumn,
+			appendCols,
 			pattern,
 			fromCond,
 			10000,
@@ -915,6 +926,13 @@ func datalakeGithubPRReportForRoot(root, projectSlug, sfName string, overridePro
 			if identityID == mergeIdentityID {
 				actionType = "GitHub PR merged"
 			}
+			title, _ := row[7].(string)
+			var url string
+			if actionType == "pull_request" {
+				url, _ = row[8].(string)
+			} else {
+				url, _ = row[9].(string)
+			}
 			item := datalakePRReportItem{
 				docID:       documentID,
 				identityID:  identityID,
@@ -923,6 +941,8 @@ func datalakeGithubPRReportForRoot(root, projectSlug, sfName string, overridePro
 				sfSlug:      sfName,
 				createdAt:   createdAt,
 				actionType:  actionType,
+				title:       title,
+				url:         url,
 				filtered:    false,
 			}
 			prItems = append(prItems, item)
@@ -2565,6 +2585,8 @@ func saveDatalakePRsReport(report []datalakePRReportItem) {
 			item.sfSlug,
 			toYMDHMSDate(item.createdAt),
 			toPRType(item.actionType),
+			item.title,
+			item.url,
 		}
 		if gFiltered {
 			row = append(row, filtered)
@@ -2585,9 +2607,9 @@ func saveDatalakePRsReport(report []datalakePRReportItem) {
 	writer = csv.NewWriter(file)
 	defer writer.Flush()
 	if gFiltered {
-		fatalError(writer.Write([]string{"document_id", "identity_id", "datasource", "insights_project_slug", "project_slug", "created_at", "type", "filtered"}))
+		fatalError(writer.Write([]string{"document_id", "identity_id", "datasource", "insights_project_slug", "project_slug", "created_at", "type", "title", "url", "filtered"}))
 	} else {
-		fatalError(writer.Write([]string{"document_id", "identity_id", "datasource", "insights_project_slug", "project_slug", "created_at", "type"}))
+		fatalError(writer.Write([]string{"document_id", "identity_id", "datasource", "insights_project_slug", "project_slug", "created_at", "type", "title", "url"}))
 	}
 	for _, row := range rows {
 		fatalError(writer.Write(row))
