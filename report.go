@@ -219,7 +219,7 @@ func getIndices(res map[string]interface{}, aliases bool) (indices []string) {
 		// to limit data processing while implementing
 		// yyy
 		/*
-			if !strings.Contains(idx, "onap") {
+			if !strings.Contains(idx, "o-ran") {
 				continue
 			}
 		*/
@@ -937,7 +937,7 @@ func datalakeGithubPRReportForRoot(root, projectSlug, sfName string, overridePro
 			item := datalakePRReportItem{
 				docID:       documentID,
 				identityID:  identityID,
-				dataSource:  "github/issue",
+				dataSource:  "github",
 				projectSlug: pSlug,
 				sfSlug:      sfName,
 				createdAt:   createdAt,
@@ -1368,7 +1368,7 @@ func datalakeGithubIssueReportForRoot(root, projectSlug, sfName string, override
 			item := datalakeIssueReportItem{
 				docID:       documentID,
 				identityID:  identityID,
-				dataSource:  "github/issue",
+				dataSource:  "github",
 				projectSlug: pSlug,
 				sfSlug:      sfName,
 				createdAt:   createdAt,
