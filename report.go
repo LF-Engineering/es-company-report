@@ -24,8 +24,8 @@ import (
 
 const (
 	// cCreatedAtColumn = "metadata__enriched_on"
-	cCreatedAtColumn = "metadata__timestamp"
-	// cCreatedAtColumn = "metadata__updated_on"
+	// cCreatedAtColumn = "metadata__timestamp"
+	cCreatedAtColumn = "metadata__updated_on"
 )
 
 var (
