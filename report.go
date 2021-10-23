@@ -26,6 +26,7 @@ const (
 	// cCreatedAtColumn = "metadata__enriched_on"
 	// cCreatedAtColumn = "metadata__timestamp"
 	cCreatedAtColumn = "metadata__updated_on"
+	cOffsetMinutes   = -60
 )
 
 var (
@@ -624,7 +625,7 @@ func datalakeLOCReportForRoot(root, projectSlug, sfSlug string, overrideProjectS
 		fromCond = getPatternIncrementalDate(key)
 		defer func() {
 			if !retry && len(locItems) > 0 {
-				savePatternIncrementalDate(key, time.Now().Add(time.Duration(-30)*time.Minute))
+				savePatternIncrementalDate(key, time.Now().Add(time.Duration(cOffsetMinutes)*time.Minute))
 			}
 		}()
 	}
@@ -809,7 +810,7 @@ func datalakeGithubPRReportForRoot(root, projectSlug, sfName string, overridePro
 		fromCond = getPatternIncrementalDate(key)
 		defer func() {
 			if !retry && len(prItems) > 0 {
-				savePatternIncrementalDate(key, time.Now().Add(time.Duration(-30)*time.Minute))
+				savePatternIncrementalDate(key, time.Now().Add(time.Duration(cOffsetMinutes)*time.Minute))
 			}
 		}()
 	}
@@ -1015,7 +1016,7 @@ func datalakeGerritReviewReportForRoot(root, projectSlug, sfName string, overrid
 		fromCond = getPatternIncrementalDate(key)
 		defer func() {
 			if !retry && len(prItems) > 0 {
-				savePatternIncrementalDate(key, time.Now().Add(time.Duration(-30)*time.Minute))
+				savePatternIncrementalDate(key, time.Now().Add(time.Duration(cOffsetMinutes)*time.Minute))
 			}
 		}()
 	}
@@ -1255,7 +1256,7 @@ func datalakeGithubIssueReportForRoot(root, projectSlug, sfName string, override
 		fromCond = getPatternIncrementalDate(key)
 		defer func() {
 			if !retry && len(issueItems) > 0 {
-				savePatternIncrementalDate(key, time.Now().Add(time.Duration(-30)*time.Minute))
+				savePatternIncrementalDate(key, time.Now().Add(time.Duration(cOffsetMinutes)*time.Minute))
 			}
 		}()
 	}
@@ -1446,7 +1447,7 @@ func datalakeJiraIssueReportForRoot(root, projectSlug, sfName string, overridePr
 		fromCond = getPatternIncrementalDate(key)
 		defer func() {
 			if !retry && len(issueItems) > 0 {
-				savePatternIncrementalDate(key, time.Now().Add(time.Duration(-30)*time.Minute))
+				savePatternIncrementalDate(key, time.Now().Add(time.Duration(cOffsetMinutes)*time.Minute))
 			}
 		}()
 	}
@@ -1641,7 +1642,7 @@ func datalakeBugzillaIssueReportForRoot(root, projectSlug, sfName string, overri
 		fromCond = getPatternIncrementalDate(key)
 		defer func() {
 			if len(issueItems) > 0 {
-				savePatternIncrementalDate(key, time.Now().Add(time.Duration(-30)*time.Minute))
+				savePatternIncrementalDate(key, time.Now().Add(time.Duration(cOffsetMinutes)*time.Minute))
 			}
 		}()
 	}
@@ -1806,7 +1807,7 @@ func datalakeDocReportForRoot(root, projectSlug, sfName string, overrideProjectS
 		fromCond = getPatternIncrementalDate(key)
 		defer func() {
 			if !retry && len(docItems) > 0 {
-				savePatternIncrementalDate(key, time.Now().Add(time.Duration(-30)*time.Minute))
+				savePatternIncrementalDate(key, time.Now().Add(time.Duration(cOffsetMinutes)*time.Minute))
 			}
 		}()
 	}
