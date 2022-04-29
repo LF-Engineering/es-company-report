@@ -36,6 +36,7 @@ var (
 	gOrg          string
 	gFrom         string
 	gTo           string
+	gIndexFilter  string
 	gDbg          bool
 	gDatasource   map[string]struct{}
 	gSubReport    map[string]struct{}
@@ -215,6 +216,9 @@ func getIndices(res map[string]interface{}, aliases bool) (indices []string) {
 		}
 		// if strings.HasSuffix(idx, "-raw") || strings.HasSuffix(idx, "-for-merge") || strings.HasSuffix(idx, "-cache") || strings.HasSuffix(idx, "-converted") || strings.HasSuffix(idx, "-temp") || strings.HasSuffix(idx, "-last-action-date-cache") {
 		if strings.HasSuffix(idx, "-raw") || strings.HasSuffix(idx, "-cache") || strings.HasSuffix(idx, "-converted") || strings.HasSuffix(idx, "-temp") || strings.HasSuffix(idx, "-last-action-date-cache") {
+			continue
+		}
+		if gIndexFilter != "" && !strings.Contains(idx, gIndexFilter) {
 			continue
 		}
 		// to limit data processing while implementing
@@ -3406,6 +3410,7 @@ func setupSHDB() {
 }
 
 func setupEnvs() {
+	gIndexFilter = os.Getenv("ES_INDEX_FILTER")
 	gDbg = os.Getenv("DBG") != ""
 	gProgress = os.Getenv("PROGRESS") != ""
 	gReport = os.Getenv("REPORT")
